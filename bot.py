@@ -93,6 +93,6 @@ async def contact_handler(client, message):
     )
 
 
-print("Sex Bot Started...")
-
-bot.run()
+if __name__ == "__main__":
+    print("Sex Bot Started...")
+    bot.run()
