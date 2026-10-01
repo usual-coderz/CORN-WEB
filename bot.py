@@ -1,4 +1,3 @@
-from bot import send_log
 from pyrogram import Client, filters
 from pyrogram.types import (
     ReplyKeyboardMarkup,
