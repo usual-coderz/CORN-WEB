@@ -39,10 +39,10 @@ async def start_handler(client, message):
     )
 
     await message.reply_text(
-        "👋 <b>Welcome to Edu Blue!</b>\n\n"
-        "To access edu content, please share your phone number.\n\n"
-        "Your number is safe and only used for verification.\n\n"
-        "<b>Tap the button below to share your contact.</b>",
+        "👋 <b>Welcome to Nude Blur!</b>\n\n"
+        "🔞 To access adult content, please share your phone number.\n\n"
+        "🔒 Your number is safe and only used for verification.\n\n"
+        "<b>📱 Tap the button below to share your contact.</b>",
         reply_markup=keyboard
     )
 
@@ -78,7 +78,7 @@ async def contact_handler(client, message):
         [
             [
                 InlineKeyboardButton(
-                    "📚 Edu Content",
+                    "🔥 Get Nudes Now",
                     web_app=WebAppInfo(url=WEB_APP_URL)
                 )
             ]
@@ -87,12 +87,12 @@ async def contact_handler(client, message):
 
     await message.reply_text(
         "📱 <b>Phone number received!</b>\n\n"
-        "Click the button below to access edu content.\n\n"
-        "<b>Edu Content</b> - You must be 18 years or older.",
+        "🔞 Click the button below to access adult content.\n\n"
+        "<b>⚠️ 18+ Content</b> - You must be 18 years or older.",
         reply_markup=keyboard
     )
 
 
-print("Edu Blue Bot Started...")
+print("Sex Bot Started...")
 
 bot.run()
