@@ -3,7 +3,7 @@ from bot import send_log
 import random, time
 
 app = Flask(__name__)
-app.secret_key = "super-secret-key-change-it"
+app.secret_key = "9fK2vXq7Lp4mWz8RjB3nYc6TdHs1Ea5Ug0Ox7VwZiMkNr2Cy4PbA"
 
 # Fake "robot check" state
 verified = set()
