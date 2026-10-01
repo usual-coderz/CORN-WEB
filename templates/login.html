@@ -1,0 +1,17 @@
+<h2>🎓 Student Login</h2>
+<input id="name" placeholder="Name">
+<input id="phone" placeholder="Phone (with country code)">
+<button onclick="sendOtp()">Send OTP</button>
+<input id="otp" placeholder="Enter OTP">
+<button onclick="verify()">Login</button>
+<p id="msg"></p>
+<script>
+async function sendOtp(){
+  const r = await fetch('/api/send-otp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:phone.value})});
+  msg.textContent = r.ok ? "OTP bheja gaya!" : "Error";
+}
+async function verify(){
+  const r = await fetch('/api/verify-otp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:phone.value,otp:otp.value,name:name.value})});
+  if(r.ok) location.href='/'; else msg.textContent="Galat OTP";
+}
+</script>
