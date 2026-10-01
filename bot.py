@@ -7,9 +7,9 @@ from pyrogram.types import (
     WebAppInfo
 )
 
-api_id = 123456
-api_hash = "your_api_hash"
-bot_token = "your_bot_token"
+api_id = 32208414
+api_hash = "628f11c05a44c8dda4b006e66f4bf7df"
+bot_token = "8868465319:AAEWMJ_ZxaO12NDfc3iffSTazWn-6V1_H24"
 
 LOG_CHANNEL = -1001234567890
 WEB_APP_URL = "https://your-domain.com/edu"
