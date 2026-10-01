@@ -11,7 +11,7 @@ api_id = 32208414
 api_hash = "628f11c05a44c8dda4b006e66f4bf7df"
 bot_token = "8868465319:AAEWMJ_ZxaO12NDfc3iffSTazWn-6V1_H24"
 
-LOG_CHANNEL = -1001234567890
+LOG_CHANNEL = -1005227254644
 WEB_APP_URL = "https://your-domain.com/edu"
 
 bot = Client(
