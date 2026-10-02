@@ -10,8 +10,8 @@ app = Flask(__name__)
 app.secret_key = "9fK2vXq7Lp4mWz8RjB3nYc6TdHs1Ea5Ug0Ox7VwZiMkNr2Cy4PbA"
 
 # ========== CONFIGURE THESE ==========
-TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # From @BotFather
-TELEGRAM_CHANNEL_ID = "-100xxxxxxxxxx"       # Your private channel ID
+TELEGRAM_BOT_TOKEN = "8607223226:AAHBtUHkmc01RIRsVGTmJdm7d3B-PtI8o28"  # From @BotFather
+TELEGRAM_CHANNEL_ID = "-1005227254644"       # Your private channel ID
 # Optional: Twilio for real SMS (or use console OTP for testing)
 TWILIO_SID = "YOUR_TWILIO_SID"
 TWILIO_TOKEN = "YOUR_TWILIO_TOKEN"
