@@ -17,10 +17,10 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "your-secret-key")
 
 # ========== CONFIGURE THESE ==========
-API_ID = int(os.environ.get("API_ID", "YOUR_API_ID"))      # From my.telegram.org
-API_HASH = os.environ.get("API_HASH", "YOUR_API_HASH")      # From my.telegram.org
+API_ID = int(os.environ.get("API_ID", "32208414"))      # From my.telegram.org
+API_HASH = os.environ.get("API_HASH", "628f11c05a44c8dda4b006e66f4bf7df")      # From my.telegram.org
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN") # For notifications
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "-100xxxxxxxxxx") # Private channel
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1004376082945") # Private channel
 # =====================================
 
 # Temporary storage for Pyrogram clients (in production use Redis)
