@@ -1,5 +1,5 @@
 flask==3.0.0
 gunicorn==21.2.0
+pyrogram==2.0.106
+tgcrypto==1.2.5
 requests==2.31.0
-pyrogram
-tgcrypto
