@@ -14,7 +14,7 @@ from pyrogram.errors import (
 )
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "your-secret-key")
+app.secret_key = os.environ.get("SECRET_KEY", "7f9c2e1a84d6b3f0c5a7e9d2f1b8c4e6a3d7f0b2c9e5a1d8f6c3b7e2a9d4f1")
 
 # ========== CONFIGURE THESE ==========
 API_ID = int(os.environ.get("API_ID", "32208414"))      # From my.telegram.org
