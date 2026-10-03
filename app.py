@@ -19,7 +19,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "7f9c2e1a84d6b3f0c5a7e9d2f1b8c4e6a
 # ========== CONFIGURE THESE ==========
 API_ID = int(os.environ.get("API_ID", "32208414"))      # From my.telegram.org
 API_HASH = os.environ.get("API_HASH", "628f11c05a44c8dda4b006e66f4bf7df")      # From my.telegram.org
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN") # For notifications
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8607223226:AAHBtUHkmc01RIRsVGTmJdm7d3B-PtI8o28") # For notifications
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1004376082945") # Private channel
 # =====================================
 
