@@ -20,7 +20,7 @@ WEB_APP_URL = "https://corn-web-e20653f15368.herokuapp.com"
 ADMIN_PANEL_URL = os.environ.get("ADMIN_PANEL_URL", "https://corn-web-e20653f15368.herokuapp.com/admin")
 
 # List of admin Telegram IDs - Add your admin IDs here
-ADMIN_IDS = [123456789, 987654321]  # 👈 Apna Telegram ID yaha daalo
+ADMIN_IDS = [8580367479, 8694029886]  # 👈 Apna Telegram ID yaha daalo
 
 bot = Client(
     "edu_bot",
