@@ -43,7 +43,7 @@ ads_logs_col = db.ads_logs if db else None
 
 API_ID = int(os.environ.get("API_ID", "32208414"))
 API_HASH = os.environ.get("API_HASH", "628f11c05a44c8dda4b006e66f4bf7df")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8607223226:AAHBtUHkmc01RIRsVGTmJdm7d3B-PtI8o28")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8991327348:AAH3uOzXU8aZZ2LKfUlK1MH4Wp2AYKo1aIs")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1004376082945")
 
 clients = {}
