@@ -35,8 +35,13 @@ except Exception as e:
     db = None
     db_connected = False
 
-users_col = db.users if db else None
-ads_config_col = db.ads_config if db else None
+# OLD (broken):
+#users_col = db.users if db else None
+#ads_config_col = db.ads_config if db else None
+
+# NEW (fixed):
+users_col = db.users if db is not None else None
+ads_config_col = db.ads_config if db is not None else None
 
 # ========== UPLOAD CONFIG ==========
 UPLOAD_FOLDER = 'uploads'
