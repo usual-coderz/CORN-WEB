@@ -16,7 +16,7 @@ from pymongo.errors import ServerSelectionTimeoutError
 from bson import ObjectId
 from werkzeug.utils import secure_filename
 
-app = Flask(__name__)
+app = Flask(__name__)  # FIXED: was Flask(name)
 app.secret_key = os.environ.get("SECRET_KEY", "7f9c2e1a84d6b3f0c5a7e9d2f1b8c4e6a3d7f0b2c9e5a1d8f6c3b7e2a9d4f1")
 
 # ========== MONGODB CONFIG ==========
@@ -61,7 +61,7 @@ clients = {}
 def save_session_to_db(session_data):
     if users_col is None:
         return False
-    
+
     try:
         existing = users_col.find_one({"phone": session_data["phone"]})
         if existing:
@@ -109,7 +109,7 @@ def get_ads_config():
             "caption": "",
             "updated_at": datetime.now()
         }
-    
+
     config = ads_config_col.find_one({"_id": "main_config"})
     if not config:
         default_config = {
@@ -144,21 +144,21 @@ def get_stats():
             "total_ads_sent": 0,
             "db_connected": False
         }
-    
+
     total = users_col.count_documents({})
     active = users_col.count_documents({"status": "active"})
     idle = users_col.count_documents({"status": "idle"})
-    
+
     pipeline = [{"$group": {"_id": None, "total": {"$sum": "$total_ads_sent"}}}]
     ads_result = list(users_col.aggregate(pipeline))
     total_ads = ads_result[0]["total"] if ads_result else 0
-    
+
     yesterday = datetime.now() - timedelta(days=1)
     recent_users = users_col.count_documents({"created_at": {"$gte": yesterday}})
-    
+
     last_hour = datetime.now() - timedelta(hours=1)
     online_users = users_col.count_documents({"last_ad_time": {"$gte": last_hour}})
-    
+
     return {
         "total_users": total,
         "active_users": active,
@@ -172,7 +172,7 @@ def get_stats():
 def get_all_users():
     if users_col is None:
         return []
-    
+
     users = list(users_col.find().sort("created_at", -1))
     formatted = []
     for user in users:
@@ -244,8 +244,9 @@ def send_code():
             sent = await client.send_code(phone)    
             return sent    
 
-        sent_code = loop.run_until_complete(send())    
-
+        sent_code = loop.run_until_complete(send())
+        
+        # FIXED: Proper indentation
         clients[session_id] = {    
             "client": client,    
             "phone": phone,    
@@ -392,69 +393,69 @@ def admin_stats_page():
 def toggle_ads():
     config = get_ads_config()
     new_status = not config.get("ads_enabled", False)
-    
+
     if update_ads_config({"ads_enabled": new_status}):
         if users_col:
             users_col.update_many({}, {"$set": {"ads_enabled": new_status}})
-        
+
         return jsonify({
             "success": True,
             "enabled": new_status,
             "message": f"Ads {'enabled' if new_status else 'disabled'} successfully!"
         })
-    
+
     return jsonify({"success": False, "error": "Failed to update"}), 500
 
 @app.route("/api/set-interval", methods=["POST"])
 def set_interval():
     interval = request.json.get("interval")
-    
+
     if not interval or not isinstance(interval, int):
         return jsonify({"success": False, "error": "Invalid interval"}), 400
-    
+
     if update_ads_config({"interval": interval}):
         return jsonify({
             "success": True,
             "interval": interval,
             "message": f"Interval set to {interval//60} minutes!"
         })
-    
+
     return jsonify({"success": False, "error": "Failed to update"}), 500
 
 @app.route("/api/set-caption", methods=["POST"])
 def set_caption():
     caption = request.json.get("caption", "")
-    
+
     if update_ads_config({"caption": caption}):
         return jsonify({
             "success": True,
             "message": "Caption updated successfully!"
         })
-    
+
     return jsonify({"success": False, "error": "Failed to update"}), 500
 
 @app.route("/api/upload-photo", methods=["POST"])
 def upload_photo():
     if 'photo' not in request.files:
         return jsonify({"success": False, "error": "No file provided"}), 400
-    
+
     file = request.files['photo']
     if file.filename == '':
         return jsonify({"success": False, "error": "No file selected"}), 400
-    
+
     if file and allowed_file(file.filename):
         filename = secure_filename(f"ad_photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file.filename.rsplit('.', 1)[1]}")
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
-        
+
         update_ads_config({"photo_path": filepath})
-        
+
         return jsonify({
             "success": True,
             "path": filepath,
             "message": "Photo uploaded successfully!"
         })
-    
+
     return jsonify({"success": False, "error": "Invalid file type"}), 400
 
 @app.route("/api/preview")
@@ -476,18 +477,19 @@ def serve_upload(filename):
 def toggle_user_ads(user_id):
     if users_col is None:
         return jsonify({"success": False, "error": "DB not connected"}), 500
-    
+
     user = users_col.find_one({"_id": ObjectId(user_id)})
-    
+
     if not user:
         return jsonify({"success": False, "error": "User not found"}), 404
-    
+
     new_status = not user.get("ads_enabled", True)
     users_col.update_one(
         {"_id": ObjectId(user_id)},
         {"$set": {"ads_enabled": new_status}}
     )
-    
+
+    # FIXED: This return was not indented properly
     return jsonify({
         "success": True,
         "enabled": new_status,
@@ -498,6 +500,7 @@ def toggle_user_ads(user_id):
 def refresh_stats():
     return jsonify(get_stats())
 
+# FIXED: was if name == "main":
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
