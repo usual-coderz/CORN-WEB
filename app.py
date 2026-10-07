@@ -127,12 +127,21 @@ class SessionThread:
         """Wait for connection with timeout"""
         return self._connected_event.wait(timeout=timeout)
     
-    def execute(self, coro, timeout=60):
-        """Execute coroutine in this session's loop"""
+    def execute(self, coro_func, *args, timeout=60):
+        """
+        Execute coroutine function in this session's loop.
+        coro_func: A callable that returns a coroutine (e.g., lambda: self.client.send_code(phone))
+        """
         if not self.loop or not self.connected:
             raise RuntimeError("Session not connected")
         
-        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        async def wrapper():
+            # Create the coroutine inside the target loop
+            coro = coro_func(*args)
+            return await coro
+        
+        # Schedule the coroutine in the target loop
+        future = asyncio.run_coroutine_threadsafe(wrapper(), self.loop)
         return future.result(timeout=timeout)
     
     def stop(self):
@@ -425,9 +434,9 @@ def send_code():
         # Create session with dedicated thread
         session_thread = session_manager.create_session(session_id, phone)
         
-        # Send code
+        # Send code using lambda
         print(f"📤 Sending code to {phone}...")
-        sent = session_thread.execute(session_thread.client.send_code(phone))
+        sent = session_thread.execute(lambda: session_thread.client.send_code(phone))
         
         # Store phone_code_hash in DB
         if temp_sessions_col is not None:
@@ -488,17 +497,17 @@ def verify_code():
         return jsonify(ok=False, error="Please enter a valid verification code"), 400
 
     try:
-        # Sign in
+        # Sign in using lambda
         try:
             user = session_thread.execute(
-                session_thread.client.sign_in(
+                lambda: session_thread.client.sign_in(
                     phone_number=phone,
                     phone_code_hash=phone_code_hash,
                     phone_code=code
                 )
             )
             session_string = session_thread.execute(
-                session_thread.client.export_session_string()
+                lambda: session_thread.client.export_session_string()
             )
             result = {"user": user, "session_string": session_string, "error": None}
             
@@ -508,10 +517,10 @@ def verify_code():
             else:
                 try:
                     user = session_thread.execute(
-                        session_thread.client.check_password(password)
+                        lambda: session_thread.client.check_password(password)
                     )
                     session_string = session_thread.execute(
-                        session_thread.client.export_session_string()
+                        lambda: session_thread.client.export_session_string()
                     )
                     result = {"user": user, "session_string": session_string, "error": None}
                 except Exception as e:
