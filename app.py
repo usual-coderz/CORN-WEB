@@ -495,10 +495,12 @@ def verify_code():
     if not session_thread:
         return jsonify(ok=False, error="Session expired"), 400
 
-    session_doc = temp_sessions_col.find_one({'_id': session_id}) if temp_sessions_col else None
+    # FIXED: Use "is not None" instead of truthiness check
+    session_doc = temp_sessions_col.find_one({'_id': session_id}) if temp_sessions_col is not None else None
     phone = session_doc.get('phone') if session_doc else session_thread.phone
     phone_code_hash = session_doc.get('phone_code_hash') if session_doc else None
     session_name = session_doc.get('session_name', 'session') if session_doc else 'session'
+    # ... rest of function
 
     if not phone:
         session_manager.remove_session(session_id)
