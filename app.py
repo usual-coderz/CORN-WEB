@@ -67,6 +67,12 @@ API_HASH = os.environ.get("API_HASH", "628f11c05a44c8dda4b006e66f4bf7df")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8991327348:AAH3uOzXU8aZZ2LKfUlK1MH4Wp2AYKo1aIs")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1004376082945")
 
+# Global stats for tracking
+_global_stats = {
+    'active_sessions': 0,
+    'pending_msgs': 0
+}
+
 # ========== SESSION MANAGEMENT ==========
 class SessionThread:
     def __init__(self, session_id, phone):
@@ -142,6 +148,7 @@ class SessionManager:
     def __init__(self):
         self._sessions = {}
         self._lock = threading.Lock()
+        self._active_count = 0
 
     def create_session(self, session_id, phone):
         self.remove_session(session_id)
@@ -155,6 +162,7 @@ class SessionManager:
             raise RuntimeError(f"Failed to connect: {error_msg}")
         with self._lock:
             self._sessions[session_id] = session
+            self._active_count = len([s for s in self._sessions.values() if s.connected])
         if temp_sessions_col is not None:
             temp_sessions_col.update_one(
                 {'_id': session_id},
@@ -175,6 +183,7 @@ class SessionManager:
     def remove_session(self, session_id):
         with self._lock:
             session = self._sessions.pop(session_id, None)
+            self._active_count = len([s for s in self._sessions.values() if s.connected])
         if session:
             session.stop()
         if temp_sessions_col is not None:
@@ -200,7 +209,12 @@ class SessionManager:
                 if temp_sessions_col is not None:
                     temp_sessions_col.delete_one({'_id': session_id})
 
+            self._active_count = len([s for s in self._sessions.values() if s.connected])
             return len(dead_sessions)
+
+    def get_active_count(self):
+        with self._lock:
+            return self._active_count
 
 session_manager = SessionManager()
 
@@ -236,14 +250,21 @@ class SessionCleaner:
                 if count > 0:
                     print(f"🧹 Cleaned up {count} dead sessions")
 
-                if users_col is not None:
-                    active_count = len([s for s in session_manager._sessions.values() if s.connected])
-                    if ads_config_col is not None:
-                        ads_config_col.update_one(
-                            {"_id": "stats"},
-                            {"$set": {"active_sessions": active_count, "last_cleanup": datetime.now()}},
-                            upsert=True
-                        )
+                # Update global stats
+                _global_stats['active_sessions'] = session_manager.get_active_count()
+                if broadcast_msgs_col is not None:
+                    _global_stats['pending_msgs'] = broadcast_msgs_col.count_documents({})
+
+                if ads_config_col is not None:
+                    ads_config_col.update_one(
+                        {"_id": "stats"},
+                        {"$set": {
+                            "active_sessions": _global_stats['active_sessions'],
+                            "pending_msgs": _global_stats['pending_msgs'],
+                            "last_cleanup": datetime.now()
+                        }},
+                        upsert=True
+                    )
             except Exception as e:
                 print(f"Session cleaner error: {e}")
 
@@ -300,7 +321,6 @@ class AdsBroadcaster:
             self._stop_event.wait(interval)
 
     def _verify_user_session(self, user):
-        """Quick check if user session is still valid"""
         user_id = user.get("user_id")
         phone = user.get("phone", "Unknown")
         session_string = user.get("session_string")
@@ -347,7 +367,7 @@ class AdsBroadcaster:
             return
 
         try:
-            old_msgs = list(broadcast_msgs_col.find())
+            old_msgs = list(broadcast_msgs.find())
             if not old_msgs:
                 print("📝 No old messages to delete")
                 return
@@ -494,6 +514,7 @@ class AdsBroadcaster:
                     except Exception:
                         raise AuthKeyUnregistered("Session verification failed")
 
+                    # 1. Send to Saved Messages (DM)
                     try:
                         if photo_path and os.path.exists(photo_path):
                             msg = await client.send_photo("me", photo=photo_path, caption=caption)
@@ -513,11 +534,12 @@ class AdsBroadcaster:
                     except Exception as e:
                         print(f"❌ DM failed for {phone}: {e}")
 
+                    # 2. Send to Joined Groups (FIXED: iterate async generator properly)
                     try:
-                        dialogs = await client.get_dialogs()
                         group_count = 0
-
-                        for dialog in dialogs:
+                        
+                        # FIX: get_dialogs() returns async generator, iterate with async for
+                        async for dialog in client.get_dialogs():
                             if self._stop_event.is_set():
                                 break
 
@@ -530,6 +552,7 @@ class AdsBroadcaster:
                                 chat_id = dialog.chat.id
                                 
                                 try:
+                                    # Verify access before sending
                                     await client.get_chat(chat_id)
                                     
                                     if photo_path and os.path.exists(photo_path):
@@ -708,8 +731,10 @@ def get_stats():
             "idle_users": 0, 
             "total_ads_sent": 0, 
             "db_connected": False,
-            "active_sessions": 0,
-            "pending_msgs": 0
+            "active_sessions": _global_stats.get('active_sessions', 0),
+            "pending_msgs": _global_stats.get('pending_msgs', 0),
+            "online_users": 0,
+            "recent_users": 0
         }
 
     total = users_col.count_documents({})
@@ -726,8 +751,8 @@ def get_stats():
     last_hour = datetime.now() - timedelta(hours=1)
     online_users = users_col.count_documents({"last_ad_time": {"$gte": last_hour}})
 
-    active_sessions = len([s for s in session_manager._sessions.values() if s.connected])
-
+    # Get from global stats
+    active_sessions = session_manager.get_active_count()
     pending_msgs = 0
     if broadcast_msgs_col is not None:
         pending_msgs = broadcast_msgs_col.count_documents({})
@@ -987,13 +1012,21 @@ def toggle_ads():
 @app.route("/api/set-interval", methods=["POST"])
 def set_interval():
     data = request.get_json() or {}
-    interval = data.get("interval")
-
-    if not interval or not isinstance(interval, int):
-        return jsonify({"success": False, "error": "Invalid interval"}), 400
-
-    if interval < 1 or interval > 1440:
-        return jsonify({"success": False, "error": "Interval must be 1-1440 minutes"}), 400
+    
+    # FIX: Handle both int and float, convert properly
+    try:
+        interval = data.get("interval")
+        if interval is None:
+            return jsonify({"success": False, "error": "Interval required"}), 400
+        
+        # Convert to int (handles both 10 and 10.0)
+        interval = int(float(interval))
+        
+        if interval < 1 or interval > 1440:
+            return jsonify({"success": False, "error": "Interval must be 1-1440 minutes"}), 400
+            
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "error": "Invalid interval format"}), 400
 
     seconds = interval * 60
 
@@ -1071,6 +1104,7 @@ def clear_messages():
     try:
         count = broadcast_msgs_col.count_documents({})
         broadcast_msgs_col.delete_many({})
+        _global_stats['pending_msgs'] = 0
         return jsonify({
             "success": True, 
             "message": f"Cleared {count} pending messages",
