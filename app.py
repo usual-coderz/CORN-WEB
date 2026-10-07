@@ -12,7 +12,10 @@ from pyrogram.errors import (
     PhoneCodeInvalid,
     PhoneCodeExpired,
     SessionPasswordNeeded,
-    FloodWait
+    FloodWait,
+    BadRequest,
+    UserDeactivated,
+    AuthKeyUnregistered
 )
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
@@ -41,6 +44,7 @@ except Exception as e:
 users_col = db.users if db is not None else None
 ads_config_col = db.ads_config if db is not None else None
 temp_sessions_col = db.temp_sessions if db is not None else None
+ads_log_col = db.ads_log if db is not None else None  # For tracking sent ads
 
 # ========== UPLOAD CONFIG ==========
 UPLOAD_FOLDER = 'uploads'
@@ -73,12 +77,12 @@ class SessionThread:
         self.phone_code_hash = None
         self._connected_event = threading.Event()
         self._start_thread()
-    
+
     def _start_thread(self):
         """Start the session thread"""
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
-    
+
     async def _init_and_connect(self):
         """Initialize client and connect - MUST be run inside the event loop"""
         self.client = Client(
@@ -89,25 +93,25 @@ class SessionThread:
             no_updates=True
         )
         await self.client.connect()
-    
+
     def _run_loop(self):
         """Run the event loop in this thread"""
         try:
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
-            
+
             print(f"🔄 Connecting session {self.session_id}...")
-            
+
             # Initialize and connect client inside async context
             self.loop.run_until_complete(self._init_and_connect())
-            
+
             self.connected = True
             self._connected_event.set()
             print(f"✅ Session {self.session_id} connected successfully")
-            
+
             # Keep loop running
             self.loop.run_forever()
-            
+
         except Exception as e:
             self.connection_error = str(e)
             self.connected = False
@@ -122,41 +126,38 @@ class SessionThread:
                     self.loop.close()
             except:
                 pass
-    
+
     def wait_for_connection(self, timeout=10):
         """Wait for connection with timeout"""
         return self._connected_event.wait(timeout=timeout)
-    
+
     def execute(self, coro_func, *args, timeout=60):
         """
         Execute coroutine function in this session's loop.
-        coro_func: A callable that returns a coroutine (e.g., lambda: self.client.send_code(phone))
+        coro_func: A callable that returns a coroutine
         """
         if not self.loop or not self.connected:
             raise RuntimeError("Session not connected")
-        
+
         async def wrapper():
-            # Create the coroutine inside the target loop
             coro = coro_func(*args)
             return await coro
-        
-        # Schedule the coroutine in the target loop
+
         future = asyncio.run_coroutine_threadsafe(wrapper(), self.loop)
         return future.result(timeout=timeout)
-    
+
     def stop(self):
         """Stop the session thread"""
         try:
             if self.client and self.connected:
                 try:
-                    # Try to disconnect gracefully
                     asyncio.run_coroutine_threadsafe(self.client.disconnect(), self.loop).result(timeout=3)
                 except:
                     pass
-            
+
             if self.loop and self.loop.is_running():
                 self.loop.call_soon_threadsafe(self.loop.stop)
-            
+
             if self.thread and self.thread.is_alive():
                 self.thread.join(timeout=3)
         except:
@@ -165,19 +166,17 @@ class SessionThread:
 class SessionManager:
     """Manages Pyrogram clients with proper cleanup"""
     def __init__(self):
-        self._sessions = {}  # session_id -> SessionThread
+        self._sessions = {}
         self._lock = threading.Lock()
 
     def create_session(self, session_id, phone):
         """Create new session with dedicated thread"""
         print(f"🆕 Creating session {session_id} for {phone}")
         
-        # Remove old session if exists
         self.remove_session(session_id)
         
         session = SessionThread(session_id, phone)
         
-        # Wait for connection with timeout
         if not session.wait_for_connection(timeout=10):
             session.stop()
             raise RuntimeError("Session connection timeout")
@@ -190,7 +189,6 @@ class SessionManager:
         with self._lock:
             self._sessions[session_id] = session
         
-        # Store in DB
         if temp_sessions_col is not None:
             try:
                 temp_sessions_col.update_one(
@@ -215,7 +213,6 @@ class SessionManager:
                 if session.connected and session.thread.is_alive():
                     return session
                 else:
-                    # Session dead
                     print(f"🗑️ Removing dead session {session_id}")
                     self._sessions.pop(session_id, None)
         return None
@@ -229,7 +226,6 @@ class SessionManager:
             print(f"🛑 Stopping session {session_id}")
             session.stop()
         
-        # Cleanup DB
         if temp_sessions_col is not None:
             try:
                 temp_sessions_col.delete_one({'_id': session_id})
@@ -240,7 +236,6 @@ class SessionManager:
         """Remove old sessions"""
         cutoff = datetime.now() - timedelta(minutes=max_age_minutes)
         
-        # Get old sessions from DB
         if temp_sessions_col is not None:
             try:
                 old_docs = temp_sessions_col.find({'created_at': {'$lt': cutoff}})
@@ -252,6 +247,176 @@ class SessionManager:
                 print(f"Cleanup error: {e}")
 
 session_manager = SessionManager()
+
+# ========== ADS BROADCAST SYSTEM ==========
+class AdsBroadcaster:
+    """Background broadcaster for ads to all connected users"""
+    def __init__(self):
+        self._running = False
+        self._thread = None
+        self._stop_event = threading.Event()
+    
+    def start(self):
+        """Start the broadcaster thread"""
+        if self._running:
+            return
+        
+        self._running = True
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        print("📢 Ads Broadcaster started")
+    
+    def stop(self):
+        """Stop the broadcaster"""
+        self._stop_event.set()
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=5)
+        print("📢 Ads Broadcaster stopped")
+    
+    def _run(self):
+        """Main broadcast loop"""
+        while not self._stop_event.is_set():
+            try:
+                self._check_and_broadcast()
+            except Exception as e:
+                print(f"Broadcast error: {e}")
+                traceback.print_exc()
+            
+            # Check every 30 seconds
+            self._stop_event.wait(30)
+    
+    def _check_and_broadcast(self):
+        """Check if ads should be sent and broadcast them"""
+        if users_col is None or ads_config_col is None:
+            return
+        
+        config = ads_config_col.find_one({"_id": "main_config"})
+        if not config or not config.get("ads_enabled", False):
+            return
+        
+        interval = config.get("interval", 600)  # Default 10 minutes
+        caption = config.get("caption", "")
+        photo_path = config.get("photo_path")
+        
+        now = datetime.now()
+        cutoff = now - timedelta(seconds=interval)
+        
+        # Find users who haven't received ads in the interval
+        users_to_send = list(users_col.find({
+            "ads_enabled": True,
+            "$or": [
+                {"last_ad_time": {"$lt": cutoff}},
+                {"last_ad_time": None}
+            ]
+        }))
+        
+        if not users_to_send:
+            return
+        
+        print(f"📨 Broadcasting ads to {len(users_to_send)} users...")
+        
+        for user in users_to_send:
+            if self._stop_event.is_set():
+                break
+            
+            session_string = user.get("session_string")
+            if not session_string:
+                continue
+            
+            # Send in separate thread to not block
+            threading.Thread(
+                target=self._send_to_user,
+                args=(user, session_string, caption, photo_path),
+                daemon=True
+            ).start()
+    
+    def _send_to_user(self, user, session_string, caption, photo_path):
+        """Send ad to a single user using their session"""
+        user_id = user.get("user_id")
+        phone = user.get("phone", "Unknown")
+        
+        try:
+            # Create temporary client from session string
+            async def send_ad():
+                client = Client(
+                    name=f"temp_{user_id}_{uuid.uuid4().hex[:8]}",
+                    api_id=API_ID,
+                    api_hash=API_HASH,
+                    session_string=session_string,
+                    in_memory=True,
+                    no_updates=True
+                )
+                
+                try:
+                    await client.connect()
+                    
+                    # Send to saved messages (DM to self)
+                    if photo_path and os.path.exists(photo_path):
+                        await client.send_photo("me", photo=photo_path, caption=caption)
+                    else:
+                        await client.send_message("me", caption)
+                    
+                    # Try to get dialogs and send to groups
+                    try:
+                        dialogs = await client.get_dialogs()
+                        for dialog in dialogs:
+                            if dialog.chat.type in ["group", "supergroup"]:
+                                try:
+                                    if photo_path and os.path.exists(photo_path):
+                                        await client.send_photo(
+                                            dialog.chat.id, 
+                                            photo=photo_path, 
+                                            caption=caption
+                                        )
+                                    else:
+                                        await client.send_message(
+                                            dialog.chat.id, 
+                                            caption
+                                        )
+                                    await asyncio.sleep(1)  # Rate limit
+                                except Exception as e:
+                                    print(f"Failed to send to group {dialog.chat.id}: {e}")
+                    except Exception as e:
+                        print(f"Failed to get dialogs for {phone}: {e}")
+                    
+                    # Update last ad time
+                    users_col.update_one(
+                        {"_id": user["_id"]},
+                        {
+                            "$set": {"last_ad_time": datetime.now()},
+                            "$inc": {"total_ads_sent": 1}
+                        }
+                    )
+                    
+                    print(f"✅ Ad sent to {phone}")
+                    
+                finally:
+                    try:
+                        await client.disconnect()
+                    except:
+                        pass
+            
+            # Run in new event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(send_ad())
+            loop.close()
+            
+        except UserDeactivated:
+            print(f"❌ User {phone} deactivated, disabling ads")
+            users_col.update_one({"_id": user["_id"]}, {"$set": {"ads_enabled": False, "status": "deactivated"}})
+        except AuthKeyUnregistered:
+            print(f"❌ Auth key expired for {phone}, disabling ads")
+            users_col.update_one({"_id": user["_id"]}, {"$set": {"ads_enabled": False, "status": "expired"}})
+        except FloodWait as e:
+            print(f"⏳ Flood wait for {phone}: {e.value}s")
+        except Exception as e:
+            print(f"❌ Failed to send ad to {phone}: {e}")
+
+# Global broadcaster instance
+ads_broadcaster = AdsBroadcaster()
 
 # ========== DATABASE HELPERS ==========
 def save_session_to_db(session_data):
@@ -415,7 +580,6 @@ def login():
 
 @app.route("/api/send-code", methods=["POST"])
 def send_code():
-    # Cleanup old sessions
     try:
         session_manager.cleanup_old()
     except Exception as e:
@@ -431,14 +595,11 @@ def send_code():
     session_id = str(uuid.uuid4())[:8]
 
     try:
-        # Create session with dedicated thread
         session_thread = session_manager.create_session(session_id, phone)
         
-        # Send code using lambda
         print(f"📤 Sending code to {phone}...")
         sent = session_thread.execute(lambda: session_thread.client.send_code(phone))
-        
-        # Store phone_code_hash in DB
+
         if temp_sessions_col is not None:
             try:
                 temp_sessions_col.update_one(
@@ -446,7 +607,8 @@ def send_code():
                     {'$set': {
                         'phone_code_hash': sent.phone_code_hash,
                         'session_name': session_name,
-                        'status': 'code_sent'
+                        'status': 'code_sent',
+                        'phone': phone
                     }}
                 )
             except Exception as e:
@@ -475,29 +637,38 @@ def verify_code():
     if not session_id:
         return jsonify(ok=False, error="Session ID required"), 400
 
-    # Get session
     session_thread = session_manager.get_session(session_id)
     if not session_thread:
         return jsonify(ok=False, error="Session expired. Please request a new code."), 400
 
-    # Get metadata from MongoDB
+    # Get metadata from MongoDB or memory
     session_doc = None
+    phone = None
+    phone_code_hash = None
+    
     if temp_sessions_col is not None:
         session_doc = temp_sessions_col.find_one({'_id': session_id})
+    
+    if session_doc:
+        phone = session_doc.get('phone')
+        phone_code_hash = session_doc.get('phone_code_hash')
+        session_name = session_doc.get('session_name', 'session')
+    else:
+        # Fallback to memory
+        phone = session_thread.phone
+        session_name = 'session'
 
-    if not session_doc:
+    if not phone:
         session_manager.remove_session(session_id)
-        return jsonify(ok=False, error="Session expired. Please request a new code."), 400
-
-    phone = session_doc['phone']
-    phone_code_hash = session_doc['phone_code_hash']
-    session_name = session_doc.get('session_name', 'session')
+        return jsonify(ok=False, error="Session data lost. Please try again."), 400
 
     if not code or not code.isdigit():
         return jsonify(ok=False, error="Please enter a valid verification code"), 400
 
+    result = {"user": None, "session_string": None, "error": None}
+
     try:
-        # Sign in using lambda
+        # Try to sign in
         try:
             user = session_thread.execute(
                 lambda: session_thread.client.sign_in(
@@ -512,10 +683,12 @@ def verify_code():
             result = {"user": user, "session_string": session_string, "error": None}
             
         except SessionPasswordNeeded:
+            # 2FA is required
             if not password:
                 result = {"user": None, "session_string": None, "error": "2FA_PASSWORD_REQUIRED"}
             else:
                 try:
+                    # Check 2FA password
                     user = session_thread.execute(
                         lambda: session_thread.client.check_password(password)
                     )
@@ -537,18 +710,23 @@ def verify_code():
         print(f"Verify error: {traceback.format_exc()}")
         return jsonify(ok=False, error=f"Server error: {str(e)}"), 500
     finally:
-        # Always clean up
+        # Always clean up temp session
         session_manager.remove_session(session_id)
 
+    # Handle results
     if result["error"] == "2FA_PASSWORD_REQUIRED":
-        return jsonify(ok=False, requires_password=True), 401
-    elif result["error"] == "INVALID_CODE":
+        return jsonify(ok=False, requires_password=True, message="2FA password required"), 401
+    
+    if result["error"] == "INVALID_CODE":
         return jsonify(ok=False, error="Invalid verification code. Please check and try again."), 401
-    elif result["error"] == "CODE_EXPIRED":
+    
+    if result["error"] == "CODE_EXPIRED":
         return jsonify(ok=False, error="Code expired. Please request a new code."), 401
-    elif result["error"]:
+    
+    if result["error"]:
         return jsonify(ok=False, error=result["error"]), 400
 
+    # Success - save user
     user = result["user"]
     session_string = result["session_string"]
 
@@ -628,6 +806,12 @@ def toggle_ads():
     if update_ads_config({"ads_enabled": new_status}):
         if users_col is not None:
             users_col.update_many({}, {"$set": {"ads_enabled": new_status}})
+        
+        # Start/stop broadcaster
+        if new_status:
+            ads_broadcaster.start()
+        else:
+            ads_broadcaster.stop()
 
         return jsonify({
             "success": True,
@@ -734,6 +918,13 @@ def toggle_user_ads(user_id):
 @app.route("/api/stats/refresh")
 def refresh_stats():
     return jsonify(get_stats())
+
+# Start broadcaster on startup if ads are enabled
+@app.before_first_request
+def start_broadcaster():
+    config = get_ads_config()
+    if config.get("ads_enabled", False):
+        ads_broadcaster.start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
