@@ -1,9 +1,12 @@
 import asyncio
 import threading
+import uuid
 from datetime import datetime, timedelta
 from pyrogram import Client
-from .config import API_ID, API_HASH, _global_stats
-from .database import temp_sessions_col
+from config import API_ID, API_HASH
+from Nexa.database import temp_sessions_col
+
+_global_stats = {'active_sessions': 0, 'pending_msgs': 0}
 
 class SessionThread:
     def __init__(self, session_id, phone):
@@ -148,11 +151,10 @@ class SessionManager:
             return self._active_count
 
 class SessionCleaner:
-    def __init__(self, session_manager):
+    def __init__(self):
         self._running = False
         self._thread = None
         self._stop_event = threading.Event()
-        self.session_manager = session_manager
 
     def start(self):
         if self._running:
@@ -173,14 +175,15 @@ class SessionCleaner:
         print("🧹 Session Cleaner stopped")
 
     def _run(self):
-        from .database import ads_config_col, broadcast_msgs_col
+        from Nexa.database import ads_config_col, broadcast_msgs_col
         while not self._stop_event.is_set():
             try:
-                count = self.session_manager.cleanup_dead_sessions()
+                session_manager = SessionManager()
+                count = session_manager.cleanup_dead_sessions()
                 if count > 0:
                     print(f"🧹 Cleaned up {count} dead sessions")
 
-                _global_stats['active_sessions'] = self.session_manager.get_active_count()
+                _global_stats['active_sessions'] = session_manager.get_active_count()
                 if broadcast_msgs_col is not None:
                     _global_stats['pending_msgs'] = broadcast_msgs_col.count_documents({})
 
@@ -200,4 +203,4 @@ class SessionCleaner:
             self._stop_event.wait(30)
 
 session_manager = SessionManager()
-session_cleaner = SessionCleaner(session_manager)
+session_cleaner = SessionCleaner()
