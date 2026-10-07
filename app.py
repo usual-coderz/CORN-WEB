@@ -4,6 +4,7 @@ import uuid
 import asyncio
 import threading
 import traceback
+import time
 from datetime import datetime, timedelta
 from pyrogram import Client
 from pyrogram.errors import (
@@ -68,9 +69,9 @@ class SessionThread:
         self.loop = None
         self.thread = None
         self.connected = False
+        self.connection_error = None
         self.phone_code_hash = None
-        self._lock = threading.Lock()
-        self._results = {}
+        self._connected_event = threading.Event()
         self._start_thread()
     
     def _start_thread(self):
@@ -80,32 +81,48 @@ class SessionThread:
     
     def _run_loop(self):
         """Run the event loop in this thread"""
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        
-        # Create client
-        self.client = Client(
-            name=f"session_{self.session_id}",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            in_memory=True,
-            no_updates=True
-        )
-        
         try:
-            # Connect synchronously
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            
+            # Create client
+            self.client = Client(
+                name=f"session_{self.session_id}",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                in_memory=True,
+                no_updates=True
+            )
+            
+            print(f"🔄 Connecting session {self.session_id}...")
+            
+            # Connect
             self.loop.run_until_complete(self.client.connect())
             self.connected = True
-            print(f"✅ Session {self.session_id} connected")
-        except Exception as e:
-            print(f"❌ Session {self.session_id} connect failed: {e}")
-            self.connected = False
-        
-        # Keep loop running
-        try:
+            self._connected_event.set()
+            print(f"✅ Session {self.session_id} connected successfully")
+            
+            # Keep loop running
             self.loop.run_forever()
+            
+        except Exception as e:
+            self.connection_error = str(e)
+            self.connected = False
+            self._connected_event.set()
+            print(f"❌ Session {self.session_id} failed: {e}")
+            traceback.print_exc()
         finally:
-            self.loop.close()
+            try:
+                if self.loop and self.loop.is_running():
+                    self.loop.stop()
+                if self.loop and not self.loop.is_closed():
+                    self.loop.close()
+            except:
+                pass
+    
+    def wait_for_connection(self, timeout=10):
+        """Wait for connection with timeout"""
+        return self._connected_event.wait(timeout=timeout)
     
     def execute(self, coro, timeout=60):
         """Execute coroutine in this session's loop"""
@@ -117,10 +134,21 @@ class SessionThread:
     
     def stop(self):
         """Stop the session thread"""
-        if self.loop and self.loop.is_running():
-            self.loop.call_soon_threadsafe(self.loop.stop)
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=5)
+        try:
+            if self.client and self.connected:
+                try:
+                    # Try to disconnect gracefully
+                    asyncio.run_coroutine_threadsafe(self.client.disconnect(), self.loop).result(timeout=3)
+                except:
+                    pass
+            
+            if self.loop and self.loop.is_running():
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            
+            if self.thread and self.thread.is_alive():
+                self.thread.join(timeout=3)
+        except:
+            pass
 
 class SessionManager:
     """Manages Pyrogram clients with proper cleanup"""
@@ -130,36 +158,40 @@ class SessionManager:
 
     def create_session(self, session_id, phone):
         """Create new session with dedicated thread"""
+        print(f"🆕 Creating session {session_id} for {phone}")
+        
         # Remove old session if exists
         self.remove_session(session_id)
         
         session = SessionThread(session_id, phone)
         
+        # Wait for connection with timeout
+        if not session.wait_for_connection(timeout=10):
+            session.stop()
+            raise RuntimeError("Session connection timeout")
+        
+        if not session.connected:
+            error_msg = session.connection_error or "Unknown connection error"
+            session.stop()
+            raise RuntimeError(f"Failed to connect: {error_msg}")
+        
         with self._lock:
             self._sessions[session_id] = session
         
-        # Wait for connection
-        import time
-        for _ in range(30):  # 3 seconds timeout
-            if session.connected:
-                break
-            time.sleep(0.1)
-        
-        if not session.connected:
-            self.remove_session(session_id)
-            raise RuntimeError("Failed to connect session")
-        
         # Store in DB
         if temp_sessions_col is not None:
-            temp_sessions_col.update_one(
-                {'_id': session_id},
-                {'$set': {
-                    'phone': phone,
-                    'created_at': datetime.now(),
-                    'status': 'connected'
-                }},
-                upsert=True
-            )
+            try:
+                temp_sessions_col.update_one(
+                    {'_id': session_id},
+                    {'$set': {
+                        'phone': phone,
+                        'created_at': datetime.now(),
+                        'status': 'connected'
+                    }},
+                    upsert=True
+                )
+            except Exception as e:
+                print(f"DB store error: {e}")
         
         return session
 
@@ -167,11 +199,13 @@ class SessionManager:
         """Get existing session"""
         with self._lock:
             session = self._sessions.get(session_id)
-            if session and session.connected:
-                return session
-            elif session:
-                # Session exists but dead
-                self._sessions.pop(session_id, None)
+            if session:
+                if session.connected and session.thread.is_alive():
+                    return session
+                else:
+                    # Session dead
+                    print(f"🗑️ Removing dead session {session_id}")
+                    self._sessions.pop(session_id, None)
         return None
 
     def remove_session(self, session_id):
@@ -180,17 +214,8 @@ class SessionManager:
             session = self._sessions.pop(session_id, None)
         
         if session:
-            try:
-                # Disconnect client
-                if session.client and session.connected:
-                    try:
-                        session.execute(session.client.disconnect(), timeout=5)
-                    except:
-                        pass
-            except:
-                pass
-            finally:
-                session.stop()
+            print(f"🛑 Stopping session {session_id}")
+            session.stop()
         
         # Cleanup DB
         if temp_sessions_col is not None:
@@ -398,18 +423,22 @@ def send_code():
         session_thread = session_manager.create_session(session_id, phone)
         
         # Send code
+        print(f"📤 Sending code to {phone}...")
         sent = session_thread.execute(session_thread.client.send_code(phone))
         
         # Store phone_code_hash in DB
         if temp_sessions_col is not None:
-            temp_sessions_col.update_one(
-                {'_id': session_id},
-                {'$set': {
-                    'phone_code_hash': sent.phone_code_hash,
-                    'session_name': session_name,
-                    'status': 'code_sent'
-                }}
-            )
+            try:
+                temp_sessions_col.update_one(
+                    {'_id': session_id},
+                    {'$set': {
+                        'phone_code_hash': sent.phone_code_hash,
+                        'session_name': session_name,
+                        'status': 'code_sent'
+                    }}
+                )
+            except Exception as e:
+                print(f"DB update error: {e}")
 
         return jsonify(ok=True, session_id=session_id, message=f"Code sent to {phone}")
 
