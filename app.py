@@ -615,7 +615,6 @@ def toggle_ads():
     if update_ads_config({"ads_enabled": new_status}):
         if users_col:
             users_col.update_many({}, {"$set": {"ads_enabled": new_status}})
-        # Direct control of broadcaster
         if new_status:
             ads_broadcaster.start()
         else:
@@ -689,12 +688,22 @@ def toggle_user_ads(user_id):
 def refresh_stats():
     return jsonify(get_stats())
 
-# Start broadcaster if ads enabled on startup
-@app.before_first_request
+# Initialize broadcaster on startup
 def init_broadcaster():
-    config = get_ads_config()
-    if config.get("ads_enabled", False):
-        ads_broadcaster.start()
+    try:
+        config = get_ads_config()
+        if config.get("ads_enabled", False):
+            ads_broadcaster.start()
+            print("✅ Auto-started broadcaster on startup")
+    except Exception as e:
+        print(f"⚠️ Could not auto-start broadcaster: {e}")
+
+# Call initialization before first request
+@app.before_request
+def before_request():
+    if not hasattr(app, '_broadcaster_initialized'):
+        init_broadcaster()
+        app._broadcaster_initialized = True
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
