@@ -1,37 +1,35 @@
-from flask import Blueprint, request, jsonify, render_template, send_from_directory, current_app
 import os
+from flask import Blueprint, render_template, request, jsonify, send_from_directory
 from datetime import datetime
 from bson import ObjectId
 from werkzeug.utils import secure_filename
-from .database import (
+from config import UPLOAD_FOLDER
+from Nexa.database import (
     get_ads_config, update_ads_config, get_stats, get_all_users,
-    broadcast_msgs_col, users_col, ads_config_col
+    users_col, broadcast_msgs_col, allowed_file
 )
-from .config import UPLOAD_FOLDER, ALLOWED_EXTENSIONS, _global_stats
-from .session_manager import session_manager, session_cleaner
+from Nexa.broadcaster import ads_broadcaster
+from Nexa.session_manager import session_manager, session_cleaner
 
-admin_bp = Blueprint('admin', __name__)
+admin_bp = Blueprint('admin', __name__, template_folder='../templates')
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-@admin_bp.route("/admin")
+@admin_bp.route("/")
 def admin_panel():
     config = get_ads_config()
-    stats = get_stats(session_manager)
+    stats = get_stats()
+    stats['active_sessions'] = session_manager.get_active_count()
     return render_template("admin.html", config=config, stats=stats)
 
-@admin_bp.route("/admin/stats")
+@admin_bp.route("/stats")
 def admin_stats_page():
-    stats = get_stats(session_manager)
+    stats = get_stats()
     users = get_all_users()
     config = get_ads_config()
+    stats['active_sessions'] = session_manager.get_active_count()
     return render_template("stats.html", stats=stats, users=users, config=config)
 
 @admin_bp.route("/api/toggle-ads", methods=["POST"])
 def toggle_ads():
-    from .broadcaster import ads_broadcaster
-    
     config = get_ads_config()
     new_status = not config.get("ads_enabled", False)
 
@@ -56,22 +54,17 @@ def toggle_ads():
 @admin_bp.route("/api/set-interval", methods=["POST"])
 def set_interval():
     data = request.get_json() or {}
-    
     try:
         interval = data.get("interval")
         if interval is None:
             return jsonify({"success": False, "error": "Interval required"}), 400
-        
         interval = int(float(interval))
-        
         if interval < 1 or interval > 1440:
             return jsonify({"success": False, "error": "Interval must be 1-1440 minutes"}), 400
-            
     except (ValueError, TypeError):
         return jsonify({"success": False, "error": "Invalid interval format"}), 400
 
     seconds = interval * 60
-
     if update_ads_config({"interval": seconds}):
         return jsonify({
             "success": True, 
@@ -136,17 +129,17 @@ def toggle_user_ads(user_id):
 
 @admin_bp.route("/api/stats/refresh")
 def refresh_stats():
-    return jsonify(get_stats(session_manager))
+    stats = get_stats()
+    stats['active_sessions'] = session_manager.get_active_count()
+    return jsonify(stats)
 
 @admin_bp.route("/api/clear-messages", methods=["POST"])
 def clear_messages():
     if broadcast_msgs_col is None:
         return jsonify({"success": False, "error": "DB not connected"}), 500
-
     try:
         count = broadcast_msgs_col.count_documents({})
         broadcast_msgs_col.delete_many({})
-        _global_stats['pending_msgs'] = 0
         return jsonify({
             "success": True, 
             "message": f"Cleared {count} pending messages",
