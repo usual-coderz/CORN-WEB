@@ -399,8 +399,13 @@ def toggle_ads():
     new_status = not config.get("ads_enabled", False)
     
     if update_ads_config({"ads_enabled": new_status}):
-        if users_col:
-            users_col.update_many({}, {"$set": {"ads_enabled": new_status}})
+        # OLD:
+#if users_col:
+    #users_col.update_many({}, {"$set": #{"ads_enabled": new_status}})
+
+# NEW:
+if users_col is not None:
+    users_col.update_many({}, {"$set": {"ads_enabled": new_status}})
         
         return jsonify({
             "success": True,
