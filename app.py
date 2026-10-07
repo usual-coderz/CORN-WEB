@@ -79,25 +79,28 @@ class SessionThread:
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
     
+    async def _init_and_connect(self):
+        """Initialize client and connect - MUST be run inside the event loop"""
+        self.client = Client(
+            name=f"session_{self.session_id}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            in_memory=True,
+            no_updates=True
+        )
+        await self.client.connect()
+    
     def _run_loop(self):
         """Run the event loop in this thread"""
         try:
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
             
-            # Create client
-            self.client = Client(
-                name=f"session_{self.session_id}",
-                api_id=API_ID,
-                api_hash=API_HASH,
-                in_memory=True,
-                no_updates=True
-            )
-            
             print(f"🔄 Connecting session {self.session_id}...")
             
-            # Connect
-            self.loop.run_until_complete(self.client.connect())
+            # Initialize and connect client inside async context
+            self.loop.run_until_complete(self._init_and_connect())
+            
             self.connected = True
             self._connected_event.set()
             print(f"✅ Session {self.session_id} connected successfully")
