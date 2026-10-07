@@ -1,25 +1,23 @@
 import asyncio
 import threading
 import time
-import os
 import uuid
 from datetime import datetime
 from pyrogram import Client
 from pyrogram.errors import (
     FloodWait, BadRequest, UserDeactivated, AuthKeyUnregistered,
-    PeerIdInvalid, ChannelInvalid
+    MsgIdInvalid, PeerIdInvalid, ChannelInvalid
 )
-from .config import API_ID, API_HASH, _global_stats
-from .database import users_col, ads_config_col, broadcast_msgs_col
+from config import API_ID, API_HASH
+from Nexa.database import users_col, ads_config_col, broadcast_msgs_col
 
 class AdsBroadcaster:
-    def __init__(self, session_manager):
+    def __init__(self):
         self._running = False
         self._thread = None
         self._stop_event = threading.Event()
         self._round_count = 0
         self._current_broadcast_id = None
-        self.session_manager = session_manager
 
     def start(self):
         if self._running:
@@ -64,10 +62,10 @@ class AdsBroadcaster:
         user_id = user.get("user_id")
         phone = user.get("phone", "Unknown")
         session_string = user.get("session_string")
-        
+
         if not session_string:
             return False
-            
+
         try:
             async def check():
                 client = Client(
@@ -89,7 +87,7 @@ class AdsBroadcaster:
                         await client.disconnect()
                     except:
                         pass
-            
+
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             result = loop.run_until_complete(check())
@@ -114,7 +112,7 @@ class AdsBroadcaster:
 
             print(f"🗑️ Deleting {len(old_msgs)} old broadcast messages...")
             deleted_count = 0
-            
+
             for msg_data in old_msgs:
                 try:
                     session_string = msg_data.get("session_string")
@@ -190,7 +188,7 @@ class AdsBroadcaster:
         photo_path = config.get("photo_path")
 
         raw_users = list(users_col.find({"ads_enabled": True}))
-        
+
         users_to_send = []
         for user in raw_users:
             if self._verify_user_session(user):
@@ -246,7 +244,7 @@ class AdsBroadcaster:
 
                 try:
                     await client.connect()
-                    
+
                     try:
                         me = await client.get_me()
                         if not me:
@@ -254,6 +252,7 @@ class AdsBroadcaster:
                     except Exception:
                         raise AuthKeyUnregistered("Session verification failed")
 
+                    # 1. Send to Saved Messages (DM)
                     try:
                         if photo_path and os.path.exists(photo_path):
                             msg = await client.send_photo("me", photo=photo_path, caption=caption)
@@ -273,9 +272,10 @@ class AdsBroadcaster:
                     except Exception as e:
                         print(f"❌ DM failed for {phone}: {e}")
 
+                    # 2. Send to Joined Groups
                     try:
                         group_count = 0
-                        
+
                         async for dialog in client.get_dialogs():
                             if self._stop_event.is_set():
                                 break
@@ -287,10 +287,10 @@ class AdsBroadcaster:
 
                             if chat_type in ["group", "supergroup"]:
                                 chat_id = dialog.chat.id
-                                
+
                                 try:
                                     await client.get_chat(chat_id)
-                                    
+
                                     if photo_path and os.path.exists(photo_path):
                                         msg = await client.send_photo(chat_id, photo=photo_path, caption=caption)
                                     else:
@@ -391,9 +391,4 @@ class AdsBroadcaster:
         except Exception as e:
             print(f"❌ Failed to send to {phone}: {e}")
 
-ads_broadcaster = None
-
-def init_broadcaster(session_manager):
-    global ads_broadcaster
-    ads_broadcaster = AdsBroadcaster(session_manager)
-    return ads_broadcaster
+ads_broadcaster = AdsBroadcaster()
