@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Bot Controller | Admin Panel</title>
+    <link rel="icon" href="data:,">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -834,7 +835,7 @@
 </head>
 <body>
     <div class="bg-gradient"></div>
-    
+
     <div class="container">
         <!-- Header -->
         <header class="header">
@@ -1002,29 +1003,29 @@
             </div>
             <div class="modal-body">
                 <p style="color: var(--text-muted); margin-bottom: 20px; font-size: 14px;">Select time between broadcast rounds. Previous messages will be deleted before new round starts.</p>
-                
+
                 <div class="interval-grid">
-                    <div class="interval-option {{ 'active' if config.interval == 600 else '' }}" onclick="setInterval(10)">
+                    <div class="interval-option {{ 'active' if config.interval == 600 else '' }}" onclick="setBroadcastInterval(10, this)">
                         <div class="interval-value">10</div>
                         <div class="interval-unit">Minutes</div>
                     </div>
-                    <div class="interval-option {{ 'active' if config.interval == 1200 else '' }}" onclick="setInterval(20)">
+                    <div class="interval-option {{ 'active' if config.interval == 1200 else '' }}" onclick="setBroadcastInterval(20, this)">
                         <div class="interval-value">20</div>
                         <div class="interval-unit">Minutes</div>
                     </div>
-                    <div class="interval-option {{ 'active' if config.interval == 1800 else '' }}" onclick="setInterval(30)">
+                    <div class="interval-option {{ 'active' if config.interval == 1800 else '' }}" onclick="setBroadcastInterval(30, this)">
                         <div class="interval-value">30</div>
                         <div class="interval-unit">Minutes</div>
                     </div>
-                    <div class="interval-option {{ 'active' if config.interval == 3600 else '' }}" onclick="setInterval(60)">
+                    <div class="interval-option {{ 'active' if config.interval == 3600 else '' }}" onclick="setBroadcastInterval(60, this)">
                         <div class="interval-value">1</div>
                         <div class="interval-unit">Hour</div>
                     </div>
-                    <div class="interval-option {{ 'active' if config.interval == 7200 else '' }}" onclick="setInterval(120)">
+                    <div class="interval-option {{ 'active' if config.interval == 7200 else '' }}" onclick="setBroadcastInterval(120, this)">
                         <div class="interval-value">2</div>
                         <div class="interval-unit">Hours</div>
                     </div>
-                    <div class="interval-option {{ 'active' if config.interval == 14400 else '' }}" onclick="setInterval(240)">
+                    <div class="interval-option {{ 'active' if config.interval == 14400 else '' }}" onclick="setBroadcastInterval(240, this)">
                         <div class="interval-value">4</div>
                         <div class="interval-unit">Hours</div>
                     </div>
@@ -1057,7 +1058,7 @@
                     <div class="upload-hint">JPG, PNG, WEBP up to 16MB</div>
                     <input type="file" id="photoInput" accept="image/*" onchange="uploadPhoto(this)">
                 </div>
-                
+
                 <div id="uploadPreview" style="display: none; margin-top: 20px;">
                     <img id="previewImage" class="preview-image" style="display: none;">
                 </div>
@@ -1119,6 +1120,10 @@
     <div class="toast-container" id="toastContainer"></div>
 
     <script>
+        // Base path for all API calls. The admin blueprint is mounted at /admin,
+        // and this page is served from /admin/, so relative paths resolve correctly.
+        const API_BASE = 'api';
+
         // Modal Functions
         function openModal(id) {
             document.getElementById(id).classList.add('active');
@@ -1138,14 +1143,14 @@
             const container = document.getElementById('toastContainer');
             const toast = document.createElement('div');
             toast.className = `toast ${type}`;
-            
+
             const icon = type === 'success' 
                 ? '<svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>'
                 : '<svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>';
-            
+
             toast.innerHTML = icon + message;
             container.appendChild(toast);
-            
+
             setTimeout(() => {
                 toast.style.opacity = '0';
                 toast.style.transform = 'translateX(100%)';
@@ -1156,14 +1161,14 @@
         // Toggle Ads
         async function toggleAds() {
             try {
-                const response = await fetch('/api/toggle-ads', { method: 'POST' });
+                const response = await fetch(`${API_BASE}/toggle-ads`, { method: 'POST' });
                 const data = await response.json();
-                
+
                 if (data.success) {
                     const switchEl = document.getElementById('toggleSwitch');
                     const statusEl = document.getElementById('toggleStatus');
                     const statBroadcast = document.getElementById('statBroadcast');
-                    
+
                     if (data.enabled) {
                         switchEl.classList.add('active');
                         statusEl.textContent = 'Running';
@@ -1175,28 +1180,32 @@
                         statBroadcast.textContent = 'PAUSED';
                         showToast('Broadcast service stopped');
                     }
+                } else {
+                    showToast(data.error || 'Toggle failed', 'error');
                 }
             } catch (e) {
                 showToast('Failed to toggle service', 'error');
             }
         }
 
-        // Set Interval
-        async function setInterval(minutes) {
+        // Set Interval (renamed from setInterval so it no longer shadows the global timer)
+        async function setBroadcastInterval(minutes, el) {
             try {
-                const response = await fetch('/api/set-interval', {
+                const response = await fetch(`${API_BASE}/set-interval`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({interval: minutes})
                 });
                 const data = await response.json();
-                
+
                 if (data.success) {
-                    document.querySelectorAll('.interval-option').forEach(el => el.classList.remove('active'));
-                    event.currentTarget.classList.add('active');
+                    document.querySelectorAll('.interval-option').forEach(x => x.classList.remove('active'));
+                    if (el) el.classList.add('active');
                     document.getElementById('statInterval').textContent = minutes + 'min interval';
                     showToast(`Interval set to ${minutes} minutes`);
                     setTimeout(() => closeModal('intervalModal'), 500);
+                } else {
+                    showToast(data.error || 'Failed to set interval', 'error');
                 }
             } catch (e) {
                 showToast('Failed to set interval', 'error');
@@ -1206,11 +1215,11 @@
         // Upload Photo
         async function uploadPhoto(input) {
             if (!input.files || !input.files[0]) return;
-            
+
             const file = input.files[0];
             const formData = new FormData();
             formData.append('photo', file);
-            
+
             // Show preview
             const reader = new FileReader();
             reader.onload = function(e) {
@@ -1220,14 +1229,14 @@
                 document.getElementById('uploadPreview').style.display = 'block';
             };
             reader.readAsDataURL(file);
-            
+
             try {
-                const response = await fetch('/api/upload-photo', {
+                const response = await fetch(`${API_BASE}/upload-photo`, {
                     method: 'POST',
                     body: formData
                 });
                 const data = await response.json();
-                
+
                 if (data.success) {
                     showToast('Media uploaded successfully');
                 } else {
@@ -1241,32 +1250,43 @@
         // Save Caption
         async function saveCaption() {
             const caption = document.getElementById('captionText').value;
-            
+
             try {
-                const response = await fetch('/api/set-caption', {
+                const response = await fetch(`${API_BASE}/set-caption`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({caption: caption})
                 });
                 const data = await response.json();
-                
+
                 if (data.success) {
                     showToast('Caption saved');
                     closeModal('captionModal');
+                } else {
+                    showToast(data.error || 'Failed to save caption', 'error');
                 }
             } catch (e) {
                 showToast('Failed to save caption', 'error');
             }
         }
 
+        // Extract just the filename from a stored path (handles / and \ separators)
+        function baseName(path) {
+            if (!path) return null;
+            return path.split(/[\\/]/).pop();
+        }
+
         // Load Preview
         async function loadPreview() {
             try {
-                const response = await fetch('/api/preview');
+                const response = await fetch(`${API_BASE}/preview`);
                 const data = await response.json();
                 const container = document.getElementById('previewContainer');
-                
-                if (!data.photo_path && !data.caption) {
+
+                // Prefer an explicit filename from the server, fall back to basename of the path
+                const photoFile = data.photo_file || baseName(data.photo_path);
+
+                if (!photoFile && !data.caption) {
                     container.innerHTML = `
                         <div class="empty-state">
                             <div class="empty-icon">
@@ -1282,10 +1302,11 @@
                     `;
                     return;
                 }
-                
+
                 let html = '<div class="preview-box">';
-                if (data.photo_path) {
-                    html += `<img src="/${data.photo_path}" class="preview-image" alt="Broadcast">`;
+                if (photoFile) {
+                    // Served by the admin blueprint's /uploads route
+                    html += `<img src="uploads/${photoFile}" class="preview-image" alt="Broadcast">`;
                 }
                 if (data.caption) {
                     html += `<div class="preview-caption">${escapeHtml(data.caption)}</div>`;
@@ -1309,12 +1330,12 @@
             return div.innerHTML;
         }
 
-        // Refresh stats every 30 seconds
-        setInterval(async () => {
+        // Refresh stats every 30 seconds (global window.setInterval, no longer shadowed)
+        window.setInterval(async () => {
             try {
-                const response = await fetch('/api/stats/refresh');
+                const response = await fetch(`${API_BASE}/stats/refresh`);
                 const data = await response.json();
-                
+
                 document.getElementById('statTotal').textContent = data.total_users;
                 document.getElementById('statActive').textContent = data.active_users;
                 document.getElementById('statMessages').textContent = data.total_ads_sent;
