@@ -15,9 +15,26 @@ temp_sessions_col = None
 ads_logs_col = None
 broadcast_msgs_col = None
 
+# Default advertisements (two configurable buttons)
+DEFAULT_ADS = [
+    {
+        "id": "ad1",
+        "text": "🔥 Hot content is available inside",
+        "label": "Adult Content Available",
+        "url": "https://example.com/adult",
+    },
+    {
+        "id": "ad2",
+        "text": "💰 Claim your free crypto reward",
+        "label": "Free Crypto Money",
+        "url": "https://example.com/crypto",
+    },
+]
+
+
 def init_db():
     global mongo_client, db, db_connected, users_col, ads_config_col, temp_sessions_col, ads_logs_col, broadcast_msgs_col
-    
+
     try:
         mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
         db = mongo_client[DB_NAME]
@@ -29,15 +46,17 @@ def init_db():
         mongo_client = None
         db = None
         db_connected = False
-    
+
     users_col = db.users if db is not None else None
     ads_config_col = db.ads_config if db is not None else None
     temp_sessions_col = db.temp_sessions if db is not None else None
     ads_logs_col = db.ads_logs if db is not None else None
     broadcast_msgs_col = db.broadcast_msgs if db is not None else None
 
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+
 
 def save_session_to_db(session_data):
     if users_col is None:
@@ -80,22 +99,34 @@ def save_session_to_db(session_data):
         print(f"MongoDB Error: {e}")
         return False
 
+
 def get_ads_config():
     if ads_config_col is None:
-        return {"ads_enabled": False, "interval": 600, "photo_path": None, "caption": "", "updated_at": datetime.now()}
+        return {
+            "ads_enabled": False,
+            "interval": 600,
+            "photo_path": None,
+            "caption": "",
+            "ads": [dict(a) for a in DEFAULT_ADS],
+            "updated_at": datetime.now()
+        }
     config = ads_config_col.find_one({"_id": "main_config"})
     if not config:
         default = {
-            "_id": "main_config", 
-            "ads_enabled": False, 
+            "_id": "main_config",
+            "ads_enabled": False,
             "interval": 600,
-            "photo_path": None, 
-            "caption": "", 
+            "photo_path": None,
+            "caption": "",
+            "ads": [dict(a) for a in DEFAULT_ADS],
             "updated_at": datetime.now()
         }
         ads_config_col.insert_one(default)
         return default
+    # Backfill the ads key for older config docs
+    config.setdefault("ads", [dict(a) for a in DEFAULT_ADS])
     return config
+
 
 def update_ads_config(updates):
     if ads_config_col is None:
@@ -104,13 +135,32 @@ def update_ads_config(updates):
     ads_config_col.update_one({"_id": "main_config"}, {"$set": updates}, upsert=True)
     return True
 
+
+def reset_ads_config():
+    """Reset all advertisement content to defaults.
+    Keeps interval + enabled state."""
+    if ads_config_col is None:
+        return False
+    ads_config_col.update_one(
+        {"_id": "main_config"},
+        {"$set": {
+            "ads": [dict(a) for a in DEFAULT_ADS],
+            "caption": "",
+            "photo_path": None,
+            "updated_at": datetime.now()
+        }},
+        upsert=True
+    )
+    return True
+
+
 def get_stats():
     if users_col is None:
         return {
-            "total_users": 0, 
-            "active_users": 0, 
-            "idle_users": 0, 
-            "total_ads_sent": 0, 
+            "total_users": 0,
+            "active_users": 0,
+            "idle_users": 0,
+            "total_ads_sent": 0,
             "db_connected": False,
             "active_sessions": 0,
             "pending_msgs": 0,
@@ -137,16 +187,17 @@ def get_stats():
         pending_msgs = broadcast_msgs_col.count_documents({})
 
     return {
-        "total_users": total, 
-        "active_users": active, 
+        "total_users": total,
+        "active_users": active,
         "idle_users": idle,
-        "online_users": online_users, 
+        "online_users": online_users,
         "recent_users": recent_users,
-        "total_ads_sent": total_ads, 
+        "total_ads_sent": total_ads,
         "db_connected": True,
         "active_sessions": 0,  # Will be updated by session_manager
         "pending_msgs": pending_msgs
     }
+
 
 def get_all_users():
     if users_col is None:
@@ -163,10 +214,11 @@ def get_all_users():
             "status": user.get("status", "unknown"),
             "ads_enabled": user.get("ads_enabled", True),
             "total_ads_sent": user.get("total_ads_sent", 0),
-            "created_at": user.get("created_at", datetime.now()).strftime("%Y-%m-%d %H:%M") if user.get("created_at") else "N/A",
-            "last_ad_time": user.get("last_ad_time", "").strftime("%Y-%m-%d %H:%M") if user.get("last_ad_time") else "Never"
+            "created_at": user["created_at"].strftime("%Y-%m-%d %H:%M") if user.get("created_at") else "N/A",
+            "last_ad_time": user["last_ad_time"].strftime("%Y-%m-%d %H:%M") if user.get("last_ad_time") else "Never"
         })
     return formatted
+
 
 def send_to_channel(message):
     if not BOT_TOKEN:
@@ -181,6 +233,7 @@ def send_to_channel(message):
     except Exception as e:
         print(f"Channel error: {e}")
         return False
+
 
 # Initialize on import
 init_db()
